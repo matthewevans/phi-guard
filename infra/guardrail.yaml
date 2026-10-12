@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  phi-guard: Bedrock guardrail used by Claude Code hooks to block PHI in prompts
+  and mask it in command output before it reaches a model without a BAA.
+
+# Deploy into the BAA-covered account. Every scan sends the suspect text to Bedrock.
+#
+# Billing is per policy, not per entity: the PII filter costs $0.10 per 1,000 text
+# units however many entity types are on, and regexes are free.
+#
+# Each entity sets InputAction (prompts, which the hook blocks) and OutputAction
+# (command output, which the hook masks). The prompt hook blocks on any
+# intervention, so the legacy Action field is set to BLOCK as the safest fallback.
+
+Parameters:
+  MemberIdPattern:
+    Type: String
+    Description: Regex for your member ID format. No default, so a placeholder can't ship.
+  ClaimNumberPattern:
+    Type: String
+    Description: Regex for your claim number format. No default, so a placeholder can't ship.
+  VersionDescription:
+    Type: String
+    Default: v1
+    Description: >-
+      A GuardrailVersion is a frozen snapshot. Change this value to publish a new
+      version after editing the guardrail, then update PHI_GUARD_GUARDRAIL_VERSION.
+
+Resources:
+  Guardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: phi-guard
+      Description: Blocks PHI in coding-agent prompts; masks it in command output.
+      BlockedInputMessaging: 'phi-guard: prompt blocked, sensitive data detected.'
+      BlockedOutputsMessaging: '[phi-guard: output withheld, sensitive data detected]'
+      SensitiveInformationPolicyConfig:
+        # Left out on purpose: URL, IP_ADDRESS, AGE, USERNAME, PASSWORD. They are
+        # constant in ordinary dev output, and the false positives would make the
+        # hooks unusable. HIPAA counts URLs/IPs as identifiers, so revisit if needed.
+        PiiEntitiesConfig:
+          - { Type: NAME, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: ADDRESS, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: EMAIL, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: PHONE, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: US_SOCIAL_SECURITY_NUMBER, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: US_INDIVIDUAL_TAX_IDENTIFICATION_NUMBER, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: US_PASSPORT_NUMBER, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: DRIVER_ID, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: LICENSE_PLATE, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: VEHICLE_IDENTIFICATION_NUMBER, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: US_BANK_ACCOUNT_NUMBER, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: CREDIT_DEBIT_CARD_NUMBER, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          # Not PHI, but the sandbox holds AWS credentials for this guardrail.
+          - { Type: AWS_ACCESS_KEY, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+          - { Type: AWS_SECRET_KEY, Action: BLOCK, InputAction: BLOCK, OutputAction: ANONYMIZE }
+        RegexesConfig:
+          - Name: MemberId
+            Pattern: !Ref MemberIdPattern
+            Action: BLOCK
+            InputAction: BLOCK
+            OutputAction: ANONYMIZE
+          - Name: ClaimNumber
+            Pattern: !Ref ClaimNumberPattern
+            Action: BLOCK
+            InputAction: BLOCK
+            OutputAction: ANONYMIZE
+          # The PII filter has no date-of-birth type. Bare dates are everywhere in
+          # logs, so this only matches a date assigned to a DOB-named key
+          # (dob, DOB, birthDate, birth_date, dateOfBirth, date_of_birth).
+          - Name: DateOfBirth
+            Pattern: '(?:[Dd][Oo][Bb]|[Bb]irth_?[Dd]ate|[Dd]ate_?[Oo]f_?[Bb]irth)["'']?\s*[:=]\s*["'']?\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}'
+            Action: BLOCK
+            InputAction: BLOCK
+            OutputAction: ANONYMIZE
+
+  GuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
+      Description: !Ref VersionDescription
+
+  # Attach to the role the sandbox's AWS profile assumes. The agent can read these
+  # credentials, so they must be able to do nothing except apply this guardrail.
+  ApplyGuardrailPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allows only bedrock:ApplyGuardrail on the phi-guard guardrail.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: bedrock:ApplyGuardrail
+            Resource: !GetAtt Guardrail.GuardrailArn
+
+Outputs:
+  GuardrailId:
+    Description: Set as PHI_GUARD_GUARDRAIL_ID.
+    Value: !GetAtt Guardrail.GuardrailId
+  GuardrailVersion:
+    Description: Set as PHI_GUARD_GUARDRAIL_VERSION.
+    Value: !GetAtt GuardrailVersion.Version
+  ApplyGuardrailPolicyArn:
+    Value: !Ref ApplyGuardrailPolicy
