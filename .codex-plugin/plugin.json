@@ -1,0 +1,6 @@
+{
+  "name": "phi-guard",
+  "version": "0.1.0",
+  "description": "Blocks PHI in prompts and masks it in shell command output before it reaches the model, using Amazon Bedrock Guardrails.",
+  "hooks": "./hooks/codex-hooks.json"
+}

@@ -30727,7 +30727,7 @@ var require_dist_cjs20 = __commonJS({
   }
 });
 
-// src/bin/prompt.ts
+// src/hooks/prompt-hook.ts
 import { json } from "node:stream/consumers";
 
 // src/guardrail.ts
@@ -30776,6 +30776,23 @@ function errorName(error2) {
   return error2 instanceof Error ? error2.name : "UnknownError";
 }
 
+// src/hooks/deadline.ts
+async function withDeadline(work, ms) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(Object.assign(new Error("hook deadline exceeded"), { name: "HookDeadlineExceeded" })),
+      ms
+    );
+    timer.unref();
+  });
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // src/hooks/prompt.ts
 async function checkPrompt(prompt, scan) {
   const result = await scan(prompt, "INPUT");
@@ -30787,15 +30804,22 @@ async function checkPrompt(prompt, scan) {
   };
 }
 
-// src/bin/prompt.ts
-var decision;
-try {
-  const { prompt } = await json(process.stdin);
-  decision = await checkPrompt(prompt, scannerFromConfig("CLAUDE_PLUGIN_OPTION_"));
-} catch (error2) {
-  decision = {
-    decision: "block",
-    reason: `phi-guard could not scan this prompt (${errorName(error2)}), so it was blocked.`
-  };
+// src/hooks/prompt-hook.ts
+async function runPromptHook(prefix, deadlineMs) {
+  try {
+    const work = (async () => {
+      const { prompt } = await json(process.stdin);
+      return checkPrompt(prompt, scannerFromConfig(prefix));
+    })();
+    return await (deadlineMs === void 0 ? work : withDeadline(work, deadlineMs));
+  } catch (error2) {
+    return {
+      decision: "block",
+      reason: `phi-guard could not scan this prompt (${errorName(error2)}), so it was blocked.`
+    };
+  }
 }
+
+// src/bin/prompt.ts
+var decision = await runPromptHook("CLAUDE_PLUGIN_OPTION_");
 if (decision) process.stdout.write(JSON.stringify(decision));

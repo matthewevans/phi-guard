@@ -10,7 +10,7 @@ pnpm test
 fresh=$(mktemp -d)
 trap 'rm -rf "$fresh"' EXIT
 scripts/build.sh "$fresh"
-if ! diff -r "$fresh" dist; then
+if ! diff -rq "$fresh" dist; then
   echo "dist/ is stale, run pnpm build" >&2
   exit 1
 fi
