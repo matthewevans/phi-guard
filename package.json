@@ -9,7 +9,8 @@
     "typecheck": "tsc",
     "test": "node --test 'test/**/*.test.ts'",
     "build": "scripts/build.sh dist",
-    "check": "scripts/check.sh"
+    "check": "scripts/check.sh",
+    "e2e": "scripts/e2e.sh"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1149.0"
