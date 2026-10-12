@@ -1,10 +1,4 @@
 {
-  "env": {
-    "AWS_PROFILE": "phi-guard",
-    "AWS_REGION": "us-east-1",
-    "PHI_GUARD_GUARDRAIL_ID": "<GuardrailId stack output>",
-    "PHI_GUARD_GUARDRAIL_VERSION": "<GuardrailVersion stack output>"
-  },
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -12,7 +6,7 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["/opt/phi-guard/src/hooks/prompt.ts"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/prompt.mjs"],
             "timeout": 20,
             "onFailure": "block",
             "statusMessage": "phi-guard: scanning prompt"
@@ -27,7 +21,7 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["/opt/phi-guard/src/hooks/bash-output.ts"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/bash-output.mjs"],
             "timeout": 20,
             "onFailure": "block",
             "statusMessage": "phi-guard: scanning output"

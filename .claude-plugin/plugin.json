@@ -1,0 +1,33 @@
+{
+  "name": "phi-guard",
+  "version": "0.1.0",
+  "description": "Blocks PHI in prompts and masks it in Bash output before it reaches the model, using Amazon Bedrock Guardrails.",
+  "author": {
+    "name": "Matt Evans"
+  },
+  "userConfig": {
+    "guardrail_id": {
+      "type": "string",
+      "title": "Guardrail ID",
+      "description": "GuardrailId output of the infra/guardrail.yaml stack",
+      "required": true
+    },
+    "guardrail_version": {
+      "type": "string",
+      "title": "Guardrail version",
+      "description": "GuardrailVersion output of the infra/guardrail.yaml stack",
+      "required": true
+    },
+    "aws_region": {
+      "type": "string",
+      "title": "AWS region",
+      "description": "Region the guardrail is deployed in, for example us-east-1",
+      "required": true
+    },
+    "aws_profile": {
+      "type": "string",
+      "title": "AWS profile",
+      "description": "Optional AWS profile with bedrock:ApplyGuardrail permission. Leave empty to use the default credential chain."
+    }
+  }
+}

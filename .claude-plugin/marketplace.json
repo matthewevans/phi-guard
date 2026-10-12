@@ -1,0 +1,14 @@
+{
+  "name": "phi-guard",
+  "description": "phi-guard: keeps PHI away from the model provider with Amazon Bedrock Guardrails.",
+  "owner": {
+    "name": "Matt Evans"
+  },
+  "plugins": [
+    {
+      "name": "phi-guard",
+      "source": "./",
+      "description": "Blocks PHI in prompts and masks it in Bash output before it reaches the model."
+    }
+  ]
+}

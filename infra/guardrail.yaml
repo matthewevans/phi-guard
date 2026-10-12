@@ -24,7 +24,8 @@ Parameters:
     Default: v1
     Description: >-
       A GuardrailVersion is a frozen snapshot. Change this value to publish a new
-      version after editing the guardrail, then update PHI_GUARD_GUARDRAIL_VERSION.
+      version after editing the guardrail, then update the plugin's guardrail_version
+      option (Codex env var PHI_GUARD_GUARDRAIL_VERSION).
 
 Resources:
   Guardrail:
@@ -95,10 +96,10 @@ Resources:
 
 Outputs:
   GuardrailId:
-    Description: Set as PHI_GUARD_GUARDRAIL_ID.
+    Description: Set as the plugin's guardrail_id option (Codex env var PHI_GUARD_GUARDRAIL_ID).
     Value: !GetAtt Guardrail.GuardrailId
   GuardrailVersion:
-    Description: Set as PHI_GUARD_GUARDRAIL_VERSION.
+    Description: Set as the plugin's guardrail_version option (Codex env var PHI_GUARD_GUARDRAIL_VERSION).
     Value: !GetAtt GuardrailVersion.Version
   ApplyGuardrailPolicyArn:
     Value: !Ref ApplyGuardrailPolicy

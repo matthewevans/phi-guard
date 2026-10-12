@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ApplyGuardrailCommandInput, ApplyGuardrailCommandOutput } from '@aws-sdk/client-bedrock-runtime';
-import { createScanner } from '../src/guardrail.ts';
+import { createScanner, readConfig } from '../src/guardrail.ts';
 
 function scannerReturning(response: Partial<ApplyGuardrailCommandOutput>) {
   const calls: ApplyGuardrailCommandInput[] = [];
@@ -60,3 +60,43 @@ test('propagates guardrail errors so hooks can fail closed', async () => {
   );
   await assert.rejects(scan('text', 'INPUT'), { name: 'ThrottlingException' });
 });
+
+const sentinel = 'fake-sentinel-value';
+const fullEnv = {
+  TEST_GUARDRAIL_ID: `${sentinel}-id`,
+  TEST_GUARDRAIL_VERSION: `${sentinel}-version`,
+  TEST_AWS_REGION: `${sentinel}-region`,
+  TEST_AWS_PROFILE: `${sentinel}-profile`,
+};
+
+test('readConfig reads the prefixed variables, including the optional profile', () => {
+  assert.deepEqual(readConfig('TEST_', fullEnv), {
+    guardrailId: `${sentinel}-id`,
+    guardrailVersion: `${sentinel}-version`,
+    region: `${sentinel}-region`,
+    profile: `${sentinel}-profile`,
+  });
+});
+
+test('readConfig leaves the profile unset when it is absent or empty', () => {
+  const { TEST_AWS_PROFILE, ...withoutProfile } = fullEnv;
+  assert.equal(readConfig('TEST_', withoutProfile).profile, undefined);
+  assert.equal(readConfig('TEST_', { ...fullEnv, TEST_AWS_PROFILE: '' }).profile, undefined);
+});
+
+for (const name of ['GUARDRAIL_ID', 'GUARDRAIL_VERSION', 'AWS_REGION']) {
+  test(`readConfig throws MissingGuardrailConfig naming ${name}, never any value`, () => {
+    for (const value of [undefined, '']) {
+      const env = { ...fullEnv, [`TEST_${name}`]: value };
+      assert.throws(
+        () => readConfig('TEST_', env),
+        (error: Error) => {
+          assert.equal(error.name, 'MissingGuardrailConfig');
+          assert.match(error.message, new RegExp(`TEST_${name}`));
+          assert.doesNotMatch(error.message, new RegExp(sentinel));
+          return true;
+        },
+      );
+    }
+  });
+}

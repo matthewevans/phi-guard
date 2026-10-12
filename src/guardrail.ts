@@ -21,7 +21,7 @@ export interface ScanResult {
 
 export type Scan = (text: string, source: GuardrailContentSource) => Promise<ScanResult>;
 
-// Well under the hook timeouts in settings.example.json, so a slow call lands in
+// Well under the hook timeouts in hooks/hooks.json, so a slow call lands in
 // the hook's own fail-closed path instead of being killed by Claude Code.
 const SCAN_TIMEOUT_MS = 10_000;
 
@@ -52,18 +52,32 @@ export function createScanner(
   };
 }
 
-export function scannerFromEnv(): Scan {
-  const { PHI_GUARD_GUARDRAIL_ID: id, PHI_GUARD_GUARDRAIL_VERSION: version } = process.env;
-  if (!id || !version) {
-    throw Object.assign(new Error('PHI_GUARD_GUARDRAIL_ID and PHI_GUARD_GUARDRAIL_VERSION must be set'), {
-      name: 'MissingGuardrailConfig',
-    });
+export interface GuardrailConfig {
+  guardrailId: string;
+  guardrailVersion: string;
+  region: string;
+  profile?: string;
+}
+
+/** Reads `${prefix}GUARDRAIL_ID`, `_GUARDRAIL_VERSION`, `_AWS_REGION` and optional `_AWS_PROFILE`. */
+export function readConfig(prefix: string, env: NodeJS.ProcessEnv = process.env): GuardrailConfig {
+  const required = ['GUARDRAIL_ID', 'GUARDRAIL_VERSION', 'AWS_REGION'].map((name) => `${prefix}${name}`);
+  const missing = required.filter((name) => !env[name]);
+  if (missing.length > 0) {
+    // Variable names only, never values.
+    throw Object.assign(new Error(`${missing.join(', ')} must be set`), { name: 'MissingGuardrailConfig' });
   }
-  const client = new BedrockRuntimeClient({});
+  const [guardrailId, guardrailVersion, region] = required.map((name) => env[name]!);
+  return { guardrailId, guardrailVersion, region, profile: env[`${prefix}AWS_PROFILE`] || undefined };
+}
+
+export function scannerFromConfig(prefix: string): Scan {
+  const { guardrailId, guardrailVersion, region, profile } = readConfig(prefix);
+  const client = new BedrockRuntimeClient({ region, ...(profile && { profile }) });
   return createScanner(
     (input, abortSignal) => client.send(new ApplyGuardrailCommand(input), { abortSignal }),
-    id,
-    version,
+    guardrailId,
+    guardrailVersion,
   );
 }
 
