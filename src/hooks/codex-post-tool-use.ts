@@ -74,7 +74,7 @@ function captureWithheld(error: unknown): BlockDecision {
   const name = failureName(error);
   if (name === 'ENOENT') {
     return withheld(
-      'no capture file was written (ENOENT); Codex must run with sandbox_mode workspace-write and a writable /tmp',
+      'no capture file was written (ENOENT); the Codex sandbox must allow writes to /tmp (workspace-write or danger-full-access)',
     );
   }
   return withheld(`capture file unreadable (${name})`);

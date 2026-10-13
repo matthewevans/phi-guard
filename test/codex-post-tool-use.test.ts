@@ -111,7 +111,7 @@ test('wrapped, missing capture: withholds and names the sandbox requirement', as
 
   assert.equal(output?.decision, 'block');
   assert.match(output!.reason, /^\[phi-guard: output withheld, no capture file was written \(ENOENT\)/);
-  assert.match(output!.reason, /workspace-write/);
+  assert.match(output!.reason, /danger-full-access/);
   assert.match(output!.reason, /\/tmp/);
 });
 

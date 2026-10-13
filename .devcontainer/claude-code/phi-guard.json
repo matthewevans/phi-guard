@@ -1,0 +1,24 @@
+{
+  "env": {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "NODE_OPTIONS": "--max-old-space-size=4096"
+  },
+  "extraKnownMarketplaces": {
+    "phi-guard": { "source": { "source": "directory", "path": "/opt/phi-guard" } }
+  },
+  "enabledPlugins": { "phi-guard@phi-guard": true },
+  "pluginConfigs": {
+    "phi-guard@phi-guard": {
+      "options": {
+        "guardrail_id": "REPLACE_IN_PART_2_GuardrailId",
+        "guardrail_version": "REPLACE_IN_PART_2_GuardrailVersion",
+        "aws_region": "REPLACE_IN_PART_2_AwsRegion",
+        "aws_profile": "phi-guard"
+      }
+    }
+  },
+  "permissions": { "disableBypassPermissionsMode": "disable" },
+  "allowManagedMcpServersOnly": true,
+  "allowedMcpServers": [],
+  "allowManagedHooksOnly": true
+}

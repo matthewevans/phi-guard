@@ -1,0 +1,51 @@
+// Adapted from Anthropic's reference devcontainer:
+// https://github.com/anthropics/claude-code/tree/main/.devcontainer/devcontainer.json
+// (c) Anthropic PBC. All rights reserved. Use is subject to Anthropic's Commercial
+// Terms of Service; see LICENSE-anthropic-reference.md.
+{
+  "name": "phi-guard (Claude Code + Codex)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "args": {
+      "TZ": "${localEnv:TZ:America/Los_Angeles}"
+    }
+  },
+  "runArgs": [
+    "--cap-add=NET_ADMIN",
+    "--cap-add=NET_RAW"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "bash",
+            "icon": "terminal-bash"
+          },
+          "zsh": {
+            "path": "zsh"
+          }
+        }
+      }
+    }
+  },
+  "remoteUser": "node",
+  "mounts": [
+    "source=claude-code-config-${devcontainerId},target=/home/node/.claude,type=volume",
+    "source=codex-config-${devcontainerId},target=/home/node/.codex,type=volume"
+  ],
+  "containerEnv": {
+    "NODE_OPTIONS": "--max-old-space-size=4096",
+    "CLAUDE_CONFIG_DIR": "/home/node/.claude",
+    "PHI_GUARD_FIREWALL": "${localEnv:PHI_GUARD_FIREWALL:on}"
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "workspaceFolder": "/workspace",
+  "postStartCommand": "if [ \"$PHI_GUARD_FIREWALL\" = off ]; then echo 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)'; else sudo /usr/local/bin/init-firewall.sh; fi",
+  "waitFor": "postStartCommand"
+}

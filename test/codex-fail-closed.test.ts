@@ -68,7 +68,7 @@ test('post hook withholds a wrapped command whose capture is missing, naming the
   const command = wrapCommand(paths, 'echo hi', randomUUID());
   const result = run('codex-post-tool-use.mjs', JSON.stringify({ tool_input: { command }, tool_response: 'marker' }));
 
-  assert.match(JSON.parse(result.stdout).reason, /no capture file was written \(ENOENT\).*workspace-write/);
+  assert.match(JSON.parse(result.stdout).reason, /no capture file was written \(ENOENT\).*danger-full-access/);
 });
 
 test('post hook withholds a FIFO capture promptly instead of blocking on open', () => {

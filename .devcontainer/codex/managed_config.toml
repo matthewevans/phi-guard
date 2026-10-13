@@ -1,0 +1,11 @@
+# Codex reads this legacy managed config as enforced policy, not as overridable
+# defaults: a session cannot select an approval policy other than on-request, and
+# its sandbox cannot leave the modes allowed in requirements.toml.
+#
+# Codex runs with full access because the container is the boundary (egress
+# firewall, root-owned config, CLIs and plugin, non-root user, no sudo beyond the
+# firewall script), matching Claude Code, which has no OS sandbox here either. Codex's
+# own bubblewrap sandbox cannot create namespaces under Docker's default seccomp
+# profile, so every command would fail, and the container is not loosened to allow it.
+sandbox_mode = "danger-full-access"
+approval_policy = "on-request"

@@ -1,0 +1,50 @@
+# Enforced Codex requirements (/etc/codex/requirements.toml), root-owned. Users
+# and the agent cannot override them from ~/.codex or a project.
+#
+# allow_managed_hooks_only skips plugin and user hooks, so phi-guard ships here as
+# managed hooks (auto-trusted, cannot be disabled). The commands are
+# hooks/codex-hooks.json with ${PLUGIN_ROOT} replaced by /opt/phi-guard;
+# test/devcontainer.test.ts keeps the two in step.
+#
+# Codex rejects an allowed_sandbox_modes list without read-only. read-only stays
+# selectable but fails closed: it has no writable root, so phi-guard withholds
+# every command output. The managed_config.toml default is danger-full-access,
+# because the container is the boundary and Codex's bubblewrap sandbox cannot run
+# under Docker's default seccomp profile. workspace-write is not allowed.
+# The approval policies exclude "never", so --yolo only logs a warning and falls
+# back to on-request; its danger-full-access sandbox matches the default.
+allow_managed_hooks_only = true
+allowed_approval_policies = ["untrusted", "on-request"]
+allowed_sandbox_modes = ["read-only", "danger-full-access"]
+
+[features]
+hooks = true
+
+# An empty table allows no MCP servers.
+[mcp_servers]
+
+[hooks]
+managed_dir = "/opt/phi-guard/dist"
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "node \"/opt/phi-guard/dist/codex-prompt.mjs\" || { echo 'phi-guard: prompt hook failed' >&2; exit 2; }"
+timeout = 20
+statusMessage = "phi-guard: scanning prompt"
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "node \"/opt/phi-guard/dist/codex-pre-tool-use.mjs\" || { echo 'phi-guard: command wrapper failed' >&2; exit 2; }"
+timeout = 20
+statusMessage = "phi-guard: preparing output scan"
+
+[[hooks.PostToolUse]]
+matcher = "^Bash$"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "node \"/opt/phi-guard/dist/codex-post-tool-use.mjs\" || { echo 'phi-guard: output hook failed' >&2; exit 2; }"
+timeout = 20
+statusMessage = "phi-guard: scanning output"

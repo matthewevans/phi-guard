@@ -1,0 +1,8 @@
+# The image copies only the plugin's runtime files and .devcontainer/, so
+# everything else stays out of the build context.
+*
+!.claude-plugin
+!.codex-plugin
+!.devcontainer
+!hooks
+!dist

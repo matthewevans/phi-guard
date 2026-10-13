@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 export interface CodexPaths {
   execPath: string;
   runnerPath: string;
-  /** `<realpath /tmp>/phi-guard-<uid>`: a writable root in Codex's workspace-write sandbox. */
+  /** `<realpath /tmp>/phi-guard-<uid>`: writable in Codex's workspace-write and danger-full-access sandboxes. */
   captureDir: string;
   uid: number;
 }

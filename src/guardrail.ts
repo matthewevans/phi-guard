@@ -71,9 +71,14 @@ export function readConfig(prefix: string, env: NodeJS.ProcessEnv = process.env)
   return { guardrailId, guardrailVersion, region, profile: env[`${prefix}AWS_PROFILE`] || undefined };
 }
 
+export function createClient({ region, profile }: Pick<GuardrailConfig, 'region' | 'profile'>): BedrockRuntimeClient {
+  // AWS_ENDPOINT_URL* and shared-config endpoint_url could otherwise redirect scans to a fake "NONE" answer.
+  return new BedrockRuntimeClient({ region, ignoreConfiguredEndpointUrls: true, ...(profile && { profile }) });
+}
+
 export function scannerFromConfig(prefix: string): Scan {
   const { guardrailId, guardrailVersion, region, profile } = readConfig(prefix);
-  const client = new BedrockRuntimeClient({ region, ...(profile && { profile }) });
+  const client = createClient({ region, profile });
   return createScanner(
     (input, abortSignal) => client.send(new ApplyGuardrailCommand(input), { abortSignal }),
     guardrailId,

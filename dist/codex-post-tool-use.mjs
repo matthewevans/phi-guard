@@ -30763,9 +30763,12 @@ function readConfig(prefix, env2 = process.env) {
   const [guardrailId, guardrailVersion, region] = required.map((name) => env2[name]);
   return { guardrailId, guardrailVersion, region, profile: env2[`${prefix}AWS_PROFILE`] || void 0 };
 }
+function createClient({ region, profile }) {
+  return new import_client_bedrock_runtime.BedrockRuntimeClient({ region, ignoreConfiguredEndpointUrls: true, ...profile && { profile } });
+}
 function scannerFromConfig(prefix) {
   const { guardrailId, guardrailVersion, region, profile } = readConfig(prefix);
-  const client = new import_client_bedrock_runtime.BedrockRuntimeClient({ region, ...profile && { profile } });
+  const client = createClient({ region, profile });
   return createScanner(
     (input, abortSignal) => client.send(new import_client_bedrock_runtime.ApplyGuardrailCommand(input), { abortSignal }),
     guardrailId,
@@ -30867,7 +30870,7 @@ function captureWithheld(error2) {
   const name = failureName(error2);
   if (name === "ENOENT") {
     return withheld(
-      "no capture file was written (ENOENT); Codex must run with sandbox_mode workspace-write and a writable /tmp"
+      "no capture file was written (ENOENT); the Codex sandbox must allow writes to /tmp (workspace-write or danger-full-access)"
     );
   }
   return withheld(`capture file unreadable (${name})`);
