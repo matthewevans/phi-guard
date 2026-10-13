@@ -5,9 +5,9 @@
 #
 # Cost: one cheap-model call per output scenario (claude --model haiku, codex -m
 # gpt-6-luna at low reasoning effort), nothing for the blocked-prompt scenarios, which
-# never reach the model. Five calls (C2, C3, X2, X3, X4) and about a minute in total. A missing CLI makes
-# that agent's scenarios SKIP; the exit status is non-zero if any scenario FAILs or if
-# nothing ran.
+# never reach the model. That is five calls (C2, C3, X2, X3, X4) and about a minute in
+# total (observed). A missing CLI makes that agent's scenarios SKIP; the exit status is
+# non-zero if any scenario FAILs or if nothing ran.
 #
 # Prerequisites: `claude` >= 2.1.295 and/or `codex` 0.162.1 installed and logged in,
 # node >= 22.18, `pnpm install` done (esbuild builds the test-only canary hooks) and
@@ -56,10 +56,12 @@
 #
 # Isolation: all scratch files live in one mktemp dir that a trap removes. Claude runs use
 # --no-session-persistence and --setting-sources project; Codex runs use --ephemeral and
-# --ignore-user-config. ~/.claude, ~/.codex and the repo are never written. The only
-# writes outside the temp dir are phi-guard's own /tmp/phi-guard-<uid> capture files,
-# which the Codex PostToolUse hook deletes. Unrelated user-level hooks and plugins can
-# still be loaded by the CLIs (Codex hooks.json, enterprise-managed settings).
+# --ignore-user-config. The script never edits anything under ~/.claude or ~/.codex, and
+# never writes the repo, but the CLIs write their own state files in their home
+# directories. The only other writes outside the temp dir are phi-guard's own
+# /tmp/phi-guard-<uid> capture files, which the Codex PostToolUse hook deletes. Unrelated
+# user-level hooks and plugins can still be loaded by the CLIs (Codex hooks.json,
+# enterprise-managed settings).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

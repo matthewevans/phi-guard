@@ -69,10 +69,12 @@ WORKDIR /workspace
 # Set `DEVCONTAINER` environment variable to help with orientation
 ENV DEVCONTAINER=true
 
-# Codex runs hooks through $SHELL. Login shells for user node must print nothing,
-# or their output corrupts the hook's JSON and the hook fails open. ZDOTDIR points
-# zsh's startup files at root-owned /etc/zsh, so a ~/.zshenv that user node (or the
-# agent) writes cannot shadow `node` for the hook command.
+# Codex runs each hook command through the passwd login shell of user node with -c
+# (observed: bash, whatever SHELL says). `bash -c` reads no startup files. SHELL and
+# ZDOTDIR serve interactive terminals: ZDOTDIR points zsh at root-owned /etc/zsh, so
+# interactive zsh does not read dotfiles that user node (or the agent) writes. That
+# also means ~/.zshrc is ignored and zsh keeps no history (HISTFILE is unset). None
+# of this protects the Codex hooks.
 ENV SHELL=/bin/zsh
 ENV ZDOTDIR=/etc/zsh
 ENV EDITOR=nano
