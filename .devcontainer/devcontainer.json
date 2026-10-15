@@ -45,11 +45,11 @@
   "containerEnv": {
     "NODE_OPTIONS": "--max-old-space-size=4096",
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
-    "PHI_GUARD_FIREWALL": "${localEnv:PHI_GUARD_FIREWALL:on}",
+    "PHI_GUARD_FIREWALL": "${localEnv:PHI_GUARD_FIREWALL:web}",
     "PHI_GUARD_EXTRA_HOSTS": "${localEnv:PHI_GUARD_EXTRA_HOSTS:}"
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
-  "postStartCommand": "if [ \"$PHI_GUARD_FIREWALL\" = off ]; then echo 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)'; else sudo /usr/local/bin/init-firewall.sh \"$PHI_GUARD_EXTRA_HOSTS\"; fi",
+  "postStartCommand": "if [ \"$PHI_GUARD_FIREWALL\" = off ]; then echo 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)'; else sudo /usr/local/bin/init-firewall.sh \"$PHI_GUARD_FIREWALL\" \"$PHI_GUARD_EXTRA_HOSTS\"; fi",
   "waitFor": "postStartCommand"
 }

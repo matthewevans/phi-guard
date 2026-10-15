@@ -176,8 +176,8 @@ test('the firewall validates the region before flushing and allows the agents an
   }
 });
 
-test('PHI_GUARD_FIREWALL defaults to on, and only the value off skips the firewall script', () => {
-  assert.equal(devcontainer.containerEnv.PHI_GUARD_FIREWALL, '${localEnv:PHI_GUARD_FIREWALL:on}');
+test('PHI_GUARD_FIREWALL defaults to web, and only the value off skips the firewall script', () => {
+  assert.equal(devcontainer.containerEnv.PHI_GUARD_FIREWALL, '${localEnv:PHI_GUARD_FIREWALL:web}');
   assert.equal(devcontainer.containerEnv.PHI_GUARD_EXTRA_HOSTS, '${localEnv:PHI_GUARD_EXTRA_HOSTS:}');
 
   const stubs = mkdtempSync(join(tmpdir(), 'phi-guard-sudo-'));
@@ -191,12 +191,68 @@ test('PHI_GUARD_FIREWALL defaults to on, and only the value off skips the firewa
         env: { PATH: `${stubs}:${process.env.PATH}`, PHI_GUARD_FIREWALL: firewall, PHI_GUARD_EXTRA_HOSTS: extraHosts },
       });
 
-    assert.equal(run('on', ''), 'sudo [/usr/local/bin/init-firewall.sh] []\n');
-    assert.equal(run('', 'a.example.com,b.example.com'), 'sudo [/usr/local/bin/init-firewall.sh] [a.example.com,b.example.com]\n');
+    assert.equal(run('web', ''), 'sudo [/usr/local/bin/init-firewall.sh] [web] []\n');
+    assert.equal(
+      run('strict', 'a.example.com,b.example.com'),
+      'sudo [/usr/local/bin/init-firewall.sh] [strict] [a.example.com,b.example.com]\n',
+    );
+    // Any other value reaches the script, which rejects it.
+    assert.equal(run('', ''), 'sudo [/usr/local/bin/init-firewall.sh] [] []\n');
     assert.equal(run('off', 'a.example.com'), 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)\n');
   } finally {
     rmSync(stubs, { recursive: true, force: true });
   }
+});
+
+test('the firewall rejects an unknown mode before any iptables call', () => {
+  const script = fileURLToPath(new URL('.devcontainer/init-firewall.sh', root));
+  const stubs = mkdtempSync(join(tmpdir(), 'phi-guard-iptables-'));
+  try {
+    // Every firewall tool the script could call records its name in a log.
+    const log = join(stubs, 'calls');
+    for (const tool of ['iptables', 'iptables-save', 'ipset', 'curl', 'jq', 'dig']) {
+      writeFileSync(join(stubs, tool), `#!/bin/sh\necho ${tool} >> "${log}"\n`);
+      chmodSync(join(stubs, tool), 0o755);
+    }
+    for (const args of [[], [''], ['on'], ['WEB'], ['off'], ['bogus', 'a.example.com']]) {
+      const result = spawnSync('bash', [script, ...args], {
+        encoding: 'utf8',
+        env: { PATH: `${stubs}:${process.env.PATH}` },
+      });
+      assert.equal(result.status, 1, `args: ${JSON.stringify(args)}`);
+      assert.match(result.stdout, /ERROR: firewall mode '\w*' is not web or strict/);
+      assert.equal(existsSync(log), false, `args: ${JSON.stringify(args)} called a firewall tool`);
+    }
+  } finally {
+    rmSync(stubs, { recursive: true, force: true });
+  }
+});
+
+test('the web mode needs no region and rejects each private range after the host-network accepts', () => {
+  assert.match(firewall, /if \[ "\$MODE" = strict \]; then\n    REGION=\$\(jq /, 'region lookup is for strict mode only');
+  assert.match(firewall, /if \[ "\$MODE" = strict \]; then\n    # Create ipset/, 'the allowlist is for strict mode only');
+  const accept = firewall.indexOf('iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT');
+  const rejects = /for cidr in ([\d./ ]+); do\n\s+iptables -A OUTPUT -d "\$cidr" -j REJECT/.exec(firewall);
+  assert.ok(rejects, 'private ranges are rejected in a loop');
+  assert.deepEqual(rejects[1].split(' '), [
+    '10.0.0.0/8',
+    '172.16.0.0/12',
+    '192.168.0.0/16',
+    '100.64.0.0/10',
+    '169.254.0.0/16',
+  ]);
+  const rejectAt = firewall.indexOf(rejects[0]);
+  assert.ok(accept !== -1 && accept < rejectAt, 'host-network accept must come before the private rejects');
+  assert.ok(rejectAt < firewall.indexOf('iptables -P OUTPUT DROP'), 'private rejects come before the DROP policy');
+  assert.ok(
+    firewall.indexOf('iptables -A OUTPUT -j ACCEPT') > firewall.indexOf('iptables -P OUTPUT DROP'),
+    'the public accept comes last',
+  );
+  assert.match(
+    firewall,
+    /if \[ "\$MODE" = web \]; then\n\s+#[^\n]*\n\s+iptables -A OUTPUT -j ACCEPT\nelse/,
+    'the public accept is web-only',
+  );
 });
 
 test('the host ~/.aws and ~/.npmrc are bind-mounted read-only, so the agent cannot plant a credential_process', () => {

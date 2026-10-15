@@ -50,25 +50,25 @@ the plugin, and enforces the hooks through managed settings for Claude Code and
 `requirements.toml` for Codex. Codex runs with `danger-full-access` because the
 container is its boundary. The `REPLACE_IN_PART_2_*` placeholders in
 `.devcontainer/Dockerfile` and `.devcontainer/claude-code/phi-guard.json` need real
-guardrail values before the hooks can scan. The firewall will not start until a real
-region is set there.
+guardrail values before the hooks can scan. The `strict` firewall mode will not start
+until a real region is set there.
 
 The container mounts your host `~/.aws` and `~/.npmrc` read-only. The hooks call
 Bedrock with the `phi-guard` profile, so add a `[profile phi-guard]` to your
 `~/.aws/config`: an SSO profile whose role allows `bedrock:ApplyGuardrail` on the
 guardrail. Refresh credentials on the host (`aws sso login`, CodeArtifact login). An
-expired session blocks prompts until you do. At start the firewall also allows the
-SSO hosts named in your `~/.aws/config` and the CodeArtifact hosts in the `registry=`
-lines of your `~/.npmrc`. For other hosts, such as a CodeArtifact endpoint for pip,
-set `PHI_GUARD_EXTRA_HOSTS` to a comma-separated list of hostnames in the host
-environment. A listed host is reachable with all of your mounted credentials. Restart the container after changing `~/.aws/config` or `~/.npmrc`.
-`PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created.
+expired session blocks prompts until you do.
 
-To start the container without the egress firewall, set `PHI_GUARD_FIREWALL=off`
-in the host environment before opening it. Only the exact value `off` skips the
-firewall, and the value is fixed when the container is created. The default is `on`. Turning it off
-removes the live-systems protection, and what the agent can reach is then your
-responsibility. The hooks never read this variable.
+Set `PHI_GUARD_FIREWALL` in the host environment before opening the container. The
+value is fixed when the container is created, and the hooks never read it.
+
+| Value | Egress |
+|---|---|
+| `web` (default) | Any public IPv4 address. Private and internal ranges are rejected, including the cloud metadata address. Web searches, WebFetch and `curl` to public sites work. |
+| `strict` | An allowlist: GitHub, npm, the model providers, Bedrock and STS for your region, the VS Code hosts, the SSO hosts named in `~/.aws/config` and the CodeArtifact hosts in the `registry=` lines of `~/.npmrc`. Add other hosts, such as a CodeArtifact endpoint for pip, with a comma-separated `PHI_GUARD_EXTRA_HOSTS`. A listed host is reachable with all of your mounted credentials. Restart the container after changing `~/.aws/config` or `~/.npmrc`. |
+| `off` | No firewall. What the agent can reach is your responsibility. |
+
+Any other value stops the firewall script before it changes a rule.
 
 ## Configuration
 

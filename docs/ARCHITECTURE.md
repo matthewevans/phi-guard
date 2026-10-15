@@ -32,7 +32,8 @@ flowchart LR
   end
 
   model[("Model APIs<br/>no BAA")]
-  live[("Databases, Jira, logs<br/>(contain PHI)")]
+  live[("Private-network systems<br/>(contain PHI)")]
+  saas[("Public SaaS and AWS data stores<br/>(may contain PHI)")]
 
   dev -->|prompt| cc
   dev -->|prompt| cx
@@ -54,6 +55,8 @@ flowchart LR
   cx -->|"clean prompts, masked output"| model
   cc -. "firewall blocks" .-> live
   cx -. "firewall blocks" .-> live
+  cc -. "reachable in web mode, strict blocks" .-> saas
+  cx -. "reachable in web mode, strict blocks" .-> saas
 ```
 
 Codex gets a different output path from Claude Code because of how its hooks
@@ -163,9 +166,10 @@ PostToolUse scans `tool_response` directly.
 
 | Way PHI could reach the model | Control | Claude Code | Codex |
 |---|---|---|---|
-| Live systems (DBs, Jira, log tools) | Container egress firewall | Covered, for IPv4, while the firewall is on | Covered, for IPv4, while the firewall is on |
+| Live systems at private addresses (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16), such as internal DBs and VPN-only tools on private IPs | Container egress firewall | Covered, for IPv4, in web and strict modes | Covered, for IPv4, in web and strict modes |
+| Public SaaS (Jira cloud, Datadog) | Container egress firewall, and the container holds no credentials for them | Reachable in web mode, covered in strict mode | Reachable in web mode, covered in strict mode |
 | Host secrets and config other than the mounted `~/.aws` and `~/.npmrc` (`~/.ssh`, MCP config) | Container boundary | Covered | Covered |
-| PHI data stores reached with the mounted AWS credentials | Container egress firewall, then the credentials' own permissions | Covered, for IPv4, while the firewall is on, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` | Covered, for IPv4, while the firewall is on, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` |
+| PHI data stores reached with the mounted AWS credentials | In strict mode the egress firewall, then the credentials' own permissions | Reachable in web mode with the mounted credentials, so the credentials' permissions govern access. Covered in strict mode, for IPv4, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` | Same as Claude Code |
 | Committed fixtures and history | Policy: no PHI committed; shallow clone | Covered by policy | Covered by policy |
 | Text the developer types or pastes | Prompt hook (block) | Covered, limited by detection | Covered, limited by detection |
 | Command output (tests, scripts) | Output hook (mask) | Covered for the `Bash` tool, limited by detection | Covered for the `Bash` tool through the wrapper, limited by detection |
@@ -181,11 +185,19 @@ Codex's documentation calls tool hooks "a useful guardrail, not a complete
 enforcement boundary", because some specialized tool paths can opt out of the hook
 path. Hosted tools such as web search use no hook path.
 
-The firewall rows hold only while the firewall is on. Setting
-`PHI_GUARD_FIREWALL` to exactly `off` skips it, and then the live-systems row is the
-user's responsibility. The hooks never read that variable. The value is fixed when
-the container is created. The firewall also writes no IPv6 rules (see the IPv4 only
-row in the Container table).
+WebSearch and Codex web search are believed to run on the provider's servers, so the
+container's firewall does not carry that traffic (not verified). WebFetch and `curl`
+run in the container and work in web mode.
+
+`PHI_GUARD_FIREWALL` selects the firewall mode: `web` (the default), `strict` or
+`off`. In `web` mode the container reaches any public IPv4 address and rejects the
+private and internal ranges. The design treats public web traffic as PHI-free, and
+treats accidental PHI access through AWS as very hard in the intended setup. `strict`
+allows only the allowlist (see Devcontainer notes). `off` skips the firewall, and then
+the live-systems rows are the user's responsibility. Any other value makes the script
+exit before it changes a rule. The hooks never read that variable. The value is fixed
+when the container is created. The firewall also writes no IPv6 rules (see the IPv4
+only row in the Container table).
 
 ## Failure behavior
 
@@ -255,16 +267,19 @@ Container:
 
 | Residual | Effect and breadth |
 |---|---|
-| AWS endpoint IPs rotate | The firewall resolves DNS once, when it starts. After a rotation the Bedrock and STS calls fail, so the hooks fail closed (prompts blocked, output withheld) until the container is restarted. A stale allowlist entry can also point at an address another party now uses (inferred, not verified) |
-| The firewall needs a real region | It reads `aws_region` from the managed Claude settings and exits before changing any rule if the value is a placeholder or does not resolve. Until Part 2 sets a real region the container runs without a firewall. The hooks still fail closed: with the placeholder region the SDK rejects the region, so prompts are blocked and output is withheld, reported under the generic error name `Error` |
-| The firewall script fails midway | It flushes the rules, then resolves hosts, then switches the default policies to DROP. A failure in between leaves egress open until a later run succeeds |
+| AWS endpoint IPs rotate (strict mode) | The strict firewall resolves DNS once, when it starts. After a rotation the Bedrock and STS calls fail, so the hooks fail closed (prompts blocked, output withheld) until the container is restarted. A stale allowlist entry can also point at an address another party now uses (inferred, not verified) |
+| Strict mode needs a real region | It reads `aws_region` from the managed Claude settings and exits before changing any rule if the value is a placeholder or does not resolve. Until Part 2 sets a real region a strict container runs without a firewall. Web mode does not read the region. The hooks still fail closed: with the placeholder region the SDK rejects the region, so prompts are blocked and output is withheld, reported under the generic error name `Error` |
+| The firewall script fails midway | It flushes the rules, then (in strict mode) resolves hosts, then switches the default policies to DROP. A failure in between leaves egress open until a later run succeeds |
 | IPv4 only | The firewall writes no IPv6 rules. If the Docker network gives the container IPv6, all IPv6 egress is unfiltered. Docker's default bridge has no IPv6 |
-| Reference firewall rules that stay | Outbound DNS (UDP 53) to any resolver, outbound SSH (TCP 22) to any host, and the host's /24 network are allowed, as in Anthropic's reference |
-| `PHI_GUARD_FIREWALL=off` | No egress boundary at all. Only the exact value `off` skips the firewall, and the value is fixed when the container is created |
+| Reference firewall rules that stay | Outbound DNS (UDP 53) to any resolver, outbound SSH (TCP 22) to any host, and the host's /24 network are allowed, as in Anthropic's reference. In web mode these accepts come before the private-range rejects, so DNS and SSH also reach private addresses, and the host's /24 stays reachable although it usually sits inside a rejected range |
+| VPN-gated services at public addresses (web mode) | A service that admits the VPN's source IP at a public address, or an internal name that resolves to a public address, is reachable when the host routes container traffic through its VPN. Its own authentication is then the only gate. Strict mode blocks it |
+| Web mode allows any public host | A tool or agent can send data to any public site. That matters only if PHI reached the context, which is what the hooks prevent. Public SaaS is reachable, and the container holds no credentials for it |
+| The agent can switch firewall modes | `node` may run `sudo /usr/local/bin/init-firewall.sh` with any argument, so the agent can re-run it as `strict` or `web`. This takes deliberate action and belongs to the same-uid class below |
+| `PHI_GUARD_FIREWALL=off` | No egress boundary at all. Only the exact value `off` skips the firewall, and the value is fixed when the container is created. Any value other than `web`, `strict` and `off` makes the script exit before it changes a rule, which leaves the container without a firewall and `postStartCommand` failing |
 | `/home/node` is writable by the agent | This covers agent state and any shell startup files. `~/.aws` and `~/.npmrc` are read-only mounts (see the next rows). Endpoint redirection through a profile's `endpoint_url` or `AWS_ENDPOINT_URL*` is neutralised by endpoint pinning |
-| The agent can read the engineer's AWS and npm credentials | `devcontainer.json` mounts the host `~/.aws` (every profile, SSO token cache and any static keys in it) and `~/.npmrc` (registry tokens). Everything the engineer's credentials can do is available to the agent, not only `bedrock:ApplyGuardrail`. With the firewall on, egress reaches the allowlist (GitHub, npm, the model providers, Bedrock, STS, SSO, the allowlisted CodeArtifact hosts, the VS Code hosts and every `PHI_GUARD_EXTRA_HOSTS` entry), plus the reference DNS, SSH and host-network rules. With `PHI_GUARD_FIREWALL=off` the credentials reach any AWS service, including PHI data stores. A token the agent reads, for example while debugging npm auth, lands in the model provider's transcript |
+| The agent can read the engineer's AWS and npm credentials | `devcontainer.json` mounts the host `~/.aws` (every profile, SSO token cache and any static keys in it) and `~/.npmrc` (registry tokens). Everything the engineer's credentials can do is available to the agent, not only `bedrock:ApplyGuardrail`. In web mode any public AWS endpoint, including PHI data stores, is reachable with those credentials, and their permissions are the only limit. In strict mode egress reaches the allowlist (GitHub, npm, the model providers, Bedrock, STS, SSO, the allowlisted CodeArtifact hosts, the VS Code hosts and every `PHI_GUARD_EXTRA_HOSTS` entry), plus the reference DNS, SSH and host-network rules. With `PHI_GUARD_FIREWALL=off` the credentials reach any AWS service, including PHI data stores. A token the agent reads, for example while debugging npm auth, lands in the model provider's transcript |
 | Read-only credential mounts | Both mounts are `readonly`, so the agent cannot edit the host's `~/.aws/config` or `~/.npmrc`, for example to plant a `credential_process` that a host tool later runs. The bundled AWS SDK ignores SSO token-cache write errors (from its source, not run against a real SSO session), so a token refresh inside the container works without persisting |
-| Derived firewall hosts are read at start | The firewall reads `portal.sso.<region>` and `oidc.<region>` for each `sso_region` in `~/.aws/config`, the host of each CodeArtifact `registry=` URL in `~/.npmrc`, and the hostnames in `PHI_GUARD_EXTRA_HOSTS`. Entries that are not valid are skipped with a warning, and a host that does not resolve is skipped with a warning. After changing `~/.aws/config` or `~/.npmrc`, restart the container. `PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created |
+| Derived firewall hosts are read at start (strict mode) | The strict firewall reads `portal.sso.<region>` and `oidc.<region>` for each `sso_region` in `~/.aws/config`, the host of each CodeArtifact `registry=` URL in `~/.npmrc`, and the hostnames in `PHI_GUARD_EXTRA_HOSTS`. Entries that are not valid are skipped with a warning, and a host that does not resolve is skipped with a warning. After changing `~/.aws/config` or `~/.npmrc`, restart the container. `PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created |
 | Expired AWS session | The scan fails with bad credentials, so prompts are blocked and output is withheld (fail closed) until the engineer refreshes the session on the host |
 | Repo-shipped enforcement | `.devcontainer/` (managed settings, `requirements.toml`, `init-firewall.sh`, `devcontainer.json`) and `dist/` live in `/workspace`, which the agent and anyone with repo write access can edit. Edits take effect at the next container start or rebuild and can remove the hooks, the managed settings or the firewall, including by changing `PHI_GUARD_FIREWALL`, and an edited `initializeCommand` runs on the host. Review `.devcontainer/` and `dist/` changes before rebuilding. Policy that engineers must not bypass belongs in server-managed settings or MDM |
 | Same-uid tampering | Anything that runs as uid `node`, and any repo or user settings `env`, can make the hooks fail open (both agents). See the same-uid rows in the Claude failure table and the Codex residuals table above |
@@ -359,7 +374,13 @@ invalid one.
   `phi-guard` profile named by `aws_profile` lives in the engineer's own
   `~/.aws/config` (an SSO profile whose role allows `bedrock:ApplyGuardrail`). The
   engineer refreshes sessions on the host.
-- **Firewall allowlist.** GitHub's published ranges, `registry.npmjs.org`, the
+- **Web mode.** The default. After the DNS, SSH, loopback and host-network accepts, it
+  rejects `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and
+  `169.254.0.0/16` (the last holds the cloud metadata service), then accepts all other
+  outbound traffic. It makes no DNS lookups for an allowlist and reads no region, so
+  it works before Part 2. Its self-test expects `https://api.github.com/zen` to answer
+  and `http://169.254.169.254/` to fail.
+- **Strict firewall allowlist.** GitHub's published ranges, `registry.npmjs.org`, the
   Anthropic hosts (`api.anthropic.com`, `claude.ai`, `claude.com`,
   `platform.claude.com`), the OpenAI hosts Codex needs (`api.openai.com`,
   `chatgpt.com`, `auth.openai.com`), `bedrock-runtime.<region>.amazonaws.com`,
@@ -368,11 +389,12 @@ invalid one.
   the Container table). The Sentry and Statsig telemetry hosts from the reference are
   dropped. Codex hosts seen rarely in its source (`ab.chatgpt.com`,
   `files.openai.com`) are not allowed. Part 2 checks whether Codex login needs them.
-- **Turning the firewall off.** `devcontainer.json` passes `PHI_GUARD_FIREWALL`
-  from the host environment into the container, default `on`. Only the exact value
-  `off` makes `postStartCommand` skip the firewall script. The value is fixed when
-  the container is created.
-- **Refreshing after IP rotation.** Restart the container.
+- **Firewall mode.** `devcontainer.json` passes `PHI_GUARD_FIREWALL` from the host
+  environment into the container, default `web`. The exact value `off` makes
+  `postStartCommand` skip the firewall script. Any other value goes to the script as
+  its first argument (`PHI_GUARD_EXTRA_HOSTS` is the second), and the script accepts
+  only `web` and `strict`. The value is fixed when the container is created.
+- **Refreshing after IP rotation (strict mode).** Restart the container.
   `postStartCommand` re-runs the script in a fresh network namespace. Re-running it
   in place is not supported.
 - **Placeholders.** `REPLACE_IN_PART_2_*` values appear in
@@ -435,6 +457,13 @@ Part 1 had no AWS access. Nothing below is claimed to work.
    of editing it in place leaves the container's single-file mount on the old file
    (inferred, not verified), and whether the files are readable by uid `node` on a
    Linux host.
+
+7. The `product-engineer` role check. On the work machine, after `good-morning`, find
+   the role and run the `apply-guardrail` probe with a well-formed guardrail ID that
+   does not exist. `AccessDeniedException` means the role lacks the permission, and
+   `ResourceNotFoundException` means it is permitted. That assumes IAM is evaluated
+   before the guardrail lookup, which is likely but unverified for this API. If the
+   permission is missing, attach `ApplyGuardrailPolicy` to the permission set.
 
 Also open: a Codex PostToolUse run that masks a fake member ID against the real
 guardrail, Codex managed requirements behavior inside the running container
