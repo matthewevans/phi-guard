@@ -306,9 +306,13 @@ devcontainer therefore ships the same hooks as managed hooks: inline `[hooks]` i
 `[mcp_servers]` table, and `allowed_approval_policies` of `untrusted` and
 `on-request`. `test/devcontainer.test.ts` keeps these commands in step with
 `hooks/codex-hooks.json`. `/etc/codex/managed_config.toml` sets
-`sandbox_mode = "danger-full-access"` and `approval_policy = "on-request"`. Its
-header describes the file as enforced policy that a session cannot override, and
-that has not been exercised in Part 1.
+`sandbox_mode = "danger-full-access"` and `approval_policy = "on-request"`. Codex
+applies its `approval_policy` as a constraint: in the built image the only
+selectable approval policy is `on-request`, so `untrusted` from
+`allowed_approval_policies` cannot be chosen either. Its `sandbox_mode` stays a
+default: `codex exec -s read-only` runs with `sandbox: read-only`. Every
+`codex exec` prints a warning that its non-interactive default (`never`) fell back
+to `on-request`.
 
 **Endpoint pinning.** The client is created with `ignoreConfiguredEndpointUrls: true`.
 `AWS_ENDPOINT_URL*` environment variables and a profile's `endpoint_url` cannot
@@ -326,8 +330,9 @@ invalid one.
   Codex source and was not observed.
 - `disableBypassPermissionsMode: "disable"` downgrades
   `--dangerously-skip-permissions` to `auto` mode, and the flag is accepted.
-- Codex `--yolo` falls back to `on-request`, because the allowed approval
-  policies exclude `never`.
+- Codex `--yolo` and `-c approval_policy=...` fall back to `on-request` with a
+  warning that names `/etc/codex/managed_config.toml` as the constraint. The
+  sandbox stays `danger-full-access`, and `-s read-only` remains selectable.
 
 ## Devcontainer notes
 

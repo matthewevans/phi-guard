@@ -11,8 +11,9 @@
 # every command output. The managed_config.toml default is danger-full-access,
 # because the container is the boundary and Codex's bubblewrap sandbox cannot run
 # under Docker's default seccomp profile. workspace-write is not allowed.
-# The approval policies exclude "never", so --yolo only logs a warning and falls
-# back to on-request; its danger-full-access sandbox matches the default.
+# The approval policies exclude "never", and managed_config.toml narrows them to
+# on-request (observed), so --yolo only logs a warning and falls back to
+# on-request; its danger-full-access sandbox matches the default.
 allow_managed_hooks_only = true
 allowed_approval_policies = ["untrusted", "on-request"]
 allowed_sandbox_modes = ["read-only", "danger-full-access"]
