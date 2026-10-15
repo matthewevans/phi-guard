@@ -20,5 +20,6 @@
   "permissions": { "disableBypassPermissionsMode": "disable" },
   "allowManagedMcpServersOnly": true,
   "allowedMcpServers": [],
-  "allowManagedHooksOnly": true
+  "allowManagedHooksOnly": true,
+  "statusLine": { "type": "command", "command": "/opt/phi-guard/statusline.sh" }
 }

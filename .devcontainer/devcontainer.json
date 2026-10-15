@@ -13,7 +13,8 @@
   },
   "runArgs": [
     "--cap-add=NET_ADMIN",
-    "--cap-add=NET_RAW"
+    "--cap-add=NET_RAW",
+    "--hostname=phi-guard-sandbox"
   ],
   "customizations": {
     "vscode": {
@@ -37,8 +38,8 @@
   "remoteUser": "node",
   "initializeCommand": "mkdir -p \"$HOME/.aws\" && touch \"$HOME/.npmrc\"",
   "mounts": [
-    "source=claude-code-config-${devcontainerId},target=/home/node/.claude,type=volume",
-    "source=codex-config-${devcontainerId},target=/home/node/.codex,type=volume",
+    "source=phi-guard-claude-config,target=/home/node/.claude,type=volume",
+    "source=phi-guard-codex-config,target=/home/node/.codex,type=volume",
     "source=${localEnv:HOME}/.aws,target=/home/node/.aws,type=bind,readonly",
     "source=${localEnv:HOME}/.npmrc,target=/home/node/.npmrc,type=bind,readonly"
   ],

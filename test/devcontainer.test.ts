@@ -83,6 +83,50 @@ test('required options are placeholders that cannot pass for real values', () =>
   }
 });
 
+test('the sandbox logins live in fixed named volumes shared by every repo, apart from the host config', () => {
+  const mounts: string[] = devcontainer.mounts;
+  for (const [volume, dir] of [
+    ['phi-guard-claude-config', '.claude'],
+    ['phi-guard-codex-config', '.codex'],
+  ]) {
+    assert.ok(mounts.includes(`source=${volume},target=/home/node/${dir},type=volume`), volume);
+  }
+});
+
+test('the container hostname and the Codex TUI show the sandbox, with item ids valid for each list', () => {
+  assert.ok(devcontainer.runArgs.includes('--hostname=phi-guard-sandbox'));
+  // Ids come from the Codex source (StatusLineItem and TerminalTitleItem). The title list
+  // has no hostname item, and an invalid id only produces a warning in the TUI.
+  assert.deepEqual(managedConfig.tables.find((table) => table.header === 'tui')?.values, {
+    status_line: ['hostname', 'model-with-reasoning', 'five-hour-limit', 'weekly-limit', 'current-dir'],
+    terminal_title: ['activity', 'project-name'],
+  });
+});
+
+test('the managed Claude status line is the root-owned script that says no PHI and names the firewall mode', () => {
+  assert.deepEqual(claudeSettings.statusLine, { type: 'command', command: `${PLUGIN_DIR}/statusline.sh` });
+  assert.match(dockerfile, /^COPY .*\.devcontainer\/statusline\.sh .* \/opt\/phi-guard\/$/m);
+  assert.match(dockerfile, /^RUN chmod 0755 \/opt\/phi-guard\/statusline\.sh/m);
+  const script = fileURLToPath(new URL('.devcontainer/statusline.sh', root));
+  const run = (env: Record<string, string>) =>
+    execFileSync(script, { encoding: 'utf8', input: '{}', env: { PATH: process.env.PATH, ...env } });
+  assert.equal(run({}), 'NO PHI · personal subscription sandbox · firewall: web\n');
+  assert.equal(run({ PHI_GUARD_FIREWALL: 'strict' }), 'NO PHI · personal subscription sandbox · firewall: strict\n');
+});
+
+test('both system rc files source the banner, which stays silent unless the shell is interactive', () => {
+  assert.match(dockerfile, /echo '\. \/opt\/phi-guard\/sandbox-banner\.sh' \| tee -a \/etc\/zsh\/zshrc \/etc\/bash\.bashrc/);
+  const banner = fileURLToPath(new URL('.devcontainer/sandbox-banner.sh', root));
+  const env = { PATH: process.env.PATH, PHI_GUARD_FIREWALL: 'strict' };
+  assert.equal(execFileSync('bash', ['-c', '. "$1"', 'bash', banner], { encoding: 'utf8', env }), '');
+  const interactive = execFileSync('bash', ['--norc', '-ic', '. "$1"', 'bash', banner], {
+    encoding: 'utf8',
+    env,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  assert.match(interactive, /^NO PHI IN THIS SANDBOX\.\n.*personal Claude\/ChatGPT subscription\.\nDo not paste, open or query patient data\. .*\n$/);
+});
+
 test('the Dockerfile env repeats the Claude placeholders for Codex', () => {
   const env = Object.fromEntries(
     [...dockerfile.matchAll(/^ENV (PHI_GUARD_\w+)=(\S+)$/gm)].map((match) => [match[1], match[2]]),
@@ -138,7 +182,7 @@ test('Codex defaults pick danger-full-access (the container is the boundary) and
   assert.equal(managedConfig.top.sandbox_mode, 'danger-full-access');
   assert.ok((requirements.top.allowed_sandbox_modes as string[]).includes(managedConfig.top.sandbox_mode as string));
   assert.ok((requirements.top.allowed_approval_policies as string[]).includes(managedConfig.top.approval_policy as string));
-  assert.deepEqual(managedConfig.tables, []);
+  assert.deepEqual(managedConfig.tables.map((table) => table.header), ['tui']);
 });
 
 test('the image pins both CLIs and copies exactly the plugin runtime files', () => {

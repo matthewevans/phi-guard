@@ -9,3 +9,10 @@
 # profile, so every command would fail, and the container is not loosened to allow it.
 sandbox_mode = "danger-full-access"
 approval_policy = "on-request"
+
+# Make the sandbox obvious in the Codex TUI: the container hostname (fixed by --hostname
+# in devcontainer.json) leads the status line. Terminal title items have no hostname
+# option, so the title carries only the activity and the project.
+[tui]
+status_line = ["hostname", "model-with-reasoning", "five-hour-limit", "weekly-limit", "current-dir"]
+terminal_title = ["activity", "project-name"]

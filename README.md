@@ -59,6 +59,14 @@ Bedrock with the `phi-guard` profile, so add a `[profile phi-guard]` to your
 guardrail. Refresh credentials on the host (`aws sso login`, CodeArtifact login). An
 expired session blocks prompts until you do.
 
+Sign in to Claude Code and Codex inside the container. Both logins live in the Docker
+volumes `phi-guard-claude-config` and `phi-guard-codex-config`, which every repo's
+container shares and which are separate from the host's `~/.claude` and `~/.codex`.
+The sandbox allows no PHI, and its markers say so: a NO PHI IN THIS SANDBOX banner and a
+`[NO PHI]` prompt prefix in interactive shells, a NO PHI Claude Code status line that
+also shows the firewall mode, and the container hostname `phi-guard-sandbox` (shown in
+the Codex status line).
+
 Set `PHI_GUARD_FIREWALL` in the host environment before opening the container. The
 value is fixed when the container is created, and the hooks never read it.
 

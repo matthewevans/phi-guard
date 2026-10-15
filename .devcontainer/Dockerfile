@@ -54,6 +54,13 @@ COPY .devcontainer/claude-code/phi-guard.json /etc/claude-code/managed-settings.
 COPY .devcontainer/codex/requirements.toml .devcontainer/codex/managed_config.toml /etc/codex/
 RUN chmod 0644 /etc/claude-code/managed-settings.d/phi-guard.json /etc/codex/*.toml
 
+# Visible sandbox markers: the Claude status line (named in phi-guard.json) and an
+# interactive shell banner and prompt prefix, which both system rc files source. Neither
+# touches non-interactive shells, where the hook commands run.
+COPY .devcontainer/statusline.sh .devcontainer/sandbox-banner.sh /opt/phi-guard/
+RUN chmod 0755 /opt/phi-guard/statusline.sh && chmod 0644 /opt/phi-guard/sandbox-banner.sh && \
+  echo '. /opt/phi-guard/sandbox-banner.sh' | tee -a /etc/zsh/zshrc /etc/bash.bashrc > /dev/null
+
 # Create workspace and config directories and set permissions
 RUN mkdir -p /workspace /home/node/.claude /home/node/.codex && \
   chown -R node:node /workspace /home/node/.claude /home/node/.codex

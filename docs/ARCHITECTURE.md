@@ -361,6 +361,30 @@ invalid one.
   cannot rewrite them. `/home/node` (shell startup files, agent state) and
   `/workspace` are writable by the agent. The mounted `~/.aws` and `~/.npmrc` are
   read-only.
+- **Login volumes.** `devcontainer.json` mounts the fixed-name volumes
+  `phi-guard-claude-config` and `phi-guard-codex-config` at `/home/node/.claude` and
+  `/home/node/.codex`. One sandbox login per machine is shared by every repo's
+  container and stays separate from the host's `~/.claude` and `~/.codex`. To sign out
+  of the sandbox, remove the containers using them and run
+  `docker volume rm phi-guard-claude-config phi-guard-codex-config`. phi-guard does not
+  choose the login method.
+- **Sandbox markers.** These markers show that a terminal is inside the sandbox.
+  `runArgs` fixes the container hostname to `phi-guard-sandbox`, and the Codex status
+  line in `codex/managed_config.toml` (`[tui]`) leads with the `hostname` item. The
+  Codex terminal title is `activity` and `project-name` because the title has no
+  hostname item. Managed settings point Claude Code's `statusLine` at the root-owned
+  `/opt/phi-guard/statusline.sh`, which prints `NO PHI`, the subscription note and
+  `PHI_GUARD_FIREWALL` (`web` when unset). `/opt/phi-guard/sandbox-banner.sh` is
+  appended as a source line to `/etc/zsh/zshrc` and `/etc/bash.bashrc`. In interactive
+  shells it prints a three-line banner that opens with `NO PHI IN THIS SANDBOX.` and
+  prefixes the prompt with `[NO PHI] `. The sandbox allows no PHI, and the hooks scan
+  as a safety net. Bash
+  adds the prefix through `PROMPT_COMMAND` because `~/.bashrc` sets `PS1` after the
+  system file. The banner returns early unless `$-` contains `i`, so the non-interactive
+  `bash -c` and `zsh -c` shells that run hook commands print nothing. Whether
+  Codex honours `[tui]` from `managed_config.toml` when it renders is unverified,
+  because headless runs draw no TUI. The markers are
+  a visual aid for the person at the terminal, and the agent can edit `~/.bashrc`.
 - **Codex sandbox.** Codex runs with `danger-full-access`. The container is the
   boundary, as it is for Claude Code, which has no OS sandbox here either. Docker's
   default seccomp profile blocks the namespaces Codex's bubblewrap sandbox needs,
