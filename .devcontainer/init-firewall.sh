@@ -8,16 +8,90 @@
 # configured phi-guard region, and drops the Sentry and Statsig telemetry hosts. The
 # region comes from the root-owned managed settings (sudo resets the caller's
 # environment), and it is validated before any rule is flushed. Hosts that share
-# an IP no longer abort the script (ipset add -exist).
+# an IP no longer abort the script (ipset add -exist). Optional hosts are derived from
+# the mounted ~/.aws/config (SSO endpoints), the mounted ~/.npmrc (CodeArtifact npm
+# registries) and the comma-separated list passed as $1 (PHI_GUARD_EXTRA_HOSTS).
+# Sourcing this file defines the functions only, so tests can call them.
 set -euo pipefail  # Exit on error, undefined vars, and pipeline failures
 IFS=$'\n\t'       # Stricter word splitting
 
 SETTINGS=/etc/claude-code/managed-settings.d/phi-guard.json
+AWS_CONFIG=/home/node/.aws/config
+NPMRC=/home/node/.npmrc
+REGION_RE='^[a-z]{2}(-[a-z]+)+-[0-9]+$'
+HOST_RE='^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$'
+CODEARTIFACT_HOST_RE='^[a-z0-9][a-z0-9-]*-[0-9]{12}\.d\.codeartifact\.[a-z0-9-]+\.amazonaws\.com$'
 
 # Prints the IPv4 addresses of the A records for a host.
 resolve_a() {
     dig +noall +answer A "$1" | awk '$4 == "A" {print $5}'
 }
+
+# Adds the A records of a host to the allowlist. Returns 1 if the host has none.
+allow_host() {
+    local host=$1 ips ip
+    echo "Resolving $host..."
+    ips=$(resolve_a "$host")
+    [ -n "$ips" ] || return 1
+    while read -r ip; do
+        if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            echo "ERROR: Invalid IP from DNS for $host: $ip"
+            exit 1
+        fi
+        echo "Adding $ip for $host"
+        ipset add allowed-domains "$ip" -exist
+    done <<<"$ips"
+}
+
+# The three functions below print one validated hostname per line and warn on stderr
+# about entries they skip. A missing or unreadable file yields nothing.
+
+# SSO credentials call portal.sso.<region> and a token refresh calls oidc.<region>, for
+# each sso_region in an AWS config file.
+sso_hosts_from_config() {
+    local file=$1 region
+    [ -r "$file" ] || return 0
+    while read -r region; do
+        if [[ "$region" =~ $REGION_RE ]]; then
+            echo "portal.sso.$region.amazonaws.com"
+            echo "oidc.$region.amazonaws.com"
+        else
+            echo "WARNING: ignoring invalid sso_region '$region' in $file" >&2
+        fi
+    done < <(sed -n 's/^[[:space:]]*sso_region[[:space:]]*=[[:space:]]*//p' "$file" | tr -d '\r' | sed 's/[[:space:]]*$//' | sort -u)
+}
+
+# The hosts of CodeArtifact registry= and @scope:registry= URLs in an npmrc. Only those
+# lines are read, because the file also holds auth tokens.
+codeartifact_hosts_from_npmrc() {
+    local file=$1 url host
+    [ -r "$file" ] || return 0
+    while read -r url; do
+        url=${url//[\"\']/}
+        if [[ "$url" =~ ^https://([^/:]+)(:[0-9]+)?(/|$) ]]; then
+            host=${BASH_REMATCH[1]}
+            if [[ "$host" =~ $CODEARTIFACT_HOST_RE ]]; then
+                echo "$host"
+            fi
+        fi
+    done < <(sed -n -E 's/^[[:space:]]*(@[^:=[:space:]]+:)?registry[[:space:]]*=[[:space:]]*//p' "$file" | tr -d '\r' | sort -u)
+}
+
+# A comma-separated list of hostnames (PHI_GUARD_EXTRA_HOSTS). Only plain hostnames
+# pass: no scheme, port, path or wildcard.
+extra_hosts_from_list() {
+    local entry
+    while IFS=$' \t' read -r entry; do
+        [ -n "$entry" ] || continue
+        if [[ "$entry" =~ $HOST_RE ]]; then
+            echo "$entry"
+        else
+            echo "WARNING: ignoring invalid PHI_GUARD_EXTRA_HOSTS entry '$entry'" >&2
+        fi
+    done < <(printf '%s\n' "$1" | tr ',' '\n')
+}
+
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 # 0. Validate the region BEFORE touching any rule: a placeholder or typo must not
 # leave the container with a flushed or half-built firewall.
@@ -25,7 +99,7 @@ REGION=$(jq -er '.pluginConfigs["phi-guard@phi-guard"].options.aws_region' "$SET
     echo "ERROR: cannot read aws_region from $SETTINGS"
     exit 1
 }
-if [[ ! "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]+$ ]]; then
+if [[ ! "$REGION" =~ $REGION_RE ]]; then
     echo "ERROR: aws_region '$REGION' in $SETTINGS is not an AWS region name (still a placeholder?)"
     exit 1
 fi
@@ -37,6 +111,14 @@ for host in "$BEDROCK_HOST" "$STS_HOST"; do
         exit 1
     fi
 done
+
+# Optional hosts are derived here too, so a bad entry is reported before any rule
+# changes. They are best effort: one that fails to resolve is skipped with a warning.
+optional_hosts=$({
+    sso_hosts_from_config "$AWS_CONFIG"
+    codeartifact_hosts_from_npmrc "$NPMRC"
+    extra_hosts_from_list "${1:-}"
+} | sort -u)
 
 # 1. Extract Docker DNS info BEFORE any flushing
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
@@ -116,22 +198,16 @@ for domain in \
     "marketplace.visualstudio.com" \
     "vscode.blob.core.windows.net" \
     "update.code.visualstudio.com"; do
-    echo "Resolving $domain..."
-    ips=$(resolve_a "$domain")
-    if [ -z "$ips" ]; then
+    allow_host "$domain" || {
         echo "ERROR: Failed to resolve $domain"
         exit 1
-    fi
-
-    while read -r ip; do
-        if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            echo "ERROR: Invalid IP from DNS for $domain: $ip"
-            exit 1
-        fi
-        echo "Adding $ip for $domain"
-        ipset add allowed-domains "$ip" -exist
-    done < <(echo "$ips")
+    }
 done
+
+while read -r host; do
+    [ -n "$host" ] || continue
+    allow_host "$host" || echo "WARNING: optional host $host does not resolve, skipping"
+done <<<"$optional_hosts"
 
 # Get host IP from default route
 HOST_IP=$(ip route | grep default | cut -d" " -f3)

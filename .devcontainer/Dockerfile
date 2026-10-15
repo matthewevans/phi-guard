@@ -47,16 +47,16 @@ COPY hooks /opt/phi-guard/hooks
 COPY dist /opt/phi-guard/dist
 RUN chmod -R u=rwX,go=rX /opt/phi-guard
 
-# Enforced agent config. Replace the REPLACE_IN_PART_2_ placeholders (here, in
-# phi-guard.json and in aws-config) with the real guardrail values.
+# Enforced agent config. Replace the REPLACE_IN_PART_2_ placeholders (here and in
+# phi-guard.json) with the real guardrail values. The AWS profile named below comes
+# from the engineer's own ~/.aws/config, which devcontainer.json mounts read-only.
 COPY .devcontainer/claude-code/phi-guard.json /etc/claude-code/managed-settings.d/phi-guard.json
 COPY .devcontainer/codex/requirements.toml .devcontainer/codex/managed_config.toml /etc/codex/
 RUN chmod 0644 /etc/claude-code/managed-settings.d/phi-guard.json /etc/codex/*.toml
 
 # Create workspace and config directories and set permissions
-RUN mkdir -p /workspace /home/node/.claude /home/node/.codex /home/node/.aws && \
-  chown -R node:node /workspace /home/node/.claude /home/node/.codex /home/node/.aws
-COPY --chown=node:node .devcontainer/aws-config /home/node/.aws/config
+RUN mkdir -p /workspace /home/node/.claude /home/node/.codex && \
+  chown -R node:node /workspace /home/node/.claude /home/node/.codex
 
 # Copy and set up firewall script
 COPY .devcontainer/init-firewall.sh /usr/local/bin/

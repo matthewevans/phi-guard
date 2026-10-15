@@ -3,8 +3,8 @@
 // the shipped plugin manifests and hooks files. Codex requirements are TOML, parsed
 // here by a tiny reader that only knows the shapes the file uses (no TOML dependency).
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -83,7 +83,7 @@ test('required options are placeholders that cannot pass for real values', () =>
   }
 });
 
-test('the Dockerfile env and AWS profile repeat the Claude placeholders for Codex', () => {
+test('the Dockerfile env repeats the Claude placeholders for Codex', () => {
   const env = Object.fromEntries(
     [...dockerfile.matchAll(/^ENV (PHI_GUARD_\w+)=(\S+)$/gm)].map((match) => [match[1], match[2]]),
   );
@@ -93,11 +93,6 @@ test('the Dockerfile env and AWS profile repeat the Claude placeholders for Code
     PHI_GUARD_AWS_REGION: options.aws_region,
     PHI_GUARD_AWS_PROFILE: options.aws_profile,
   });
-
-  assert.equal(
-    read('.devcontainer/aws-config').replace(/^#.*\n/gm, ''),
-    `[profile ${options.aws_profile}]\nregion = ${options.aws_region}\n`,
-  );
 });
 
 test('Codex managed hooks are the shipped hooks file pointed at the installed plugin', () => {
@@ -162,6 +157,10 @@ test('the firewall validates the region before flushing and allows the agents an
     firewall.indexOf('is not an AWS region name') < firewall.indexOf('iptables -F'),
     'region validation must come before any flush',
   );
+  assert.ok(
+    firewall.indexOf('optional_hosts=$(') < firewall.indexOf('iptables -F'),
+    'optional host validation must come before any flush',
+  );
   for (const host of [
     'api.anthropic.com',
     'claude.ai',
@@ -179,21 +178,132 @@ test('the firewall validates the region before flushing and allows the agents an
 
 test('PHI_GUARD_FIREWALL defaults to on, and only the value off skips the firewall script', () => {
   assert.equal(devcontainer.containerEnv.PHI_GUARD_FIREWALL, '${localEnv:PHI_GUARD_FIREWALL:on}');
+  assert.equal(devcontainer.containerEnv.PHI_GUARD_EXTRA_HOSTS, '${localEnv:PHI_GUARD_EXTRA_HOSTS:}');
 
   const stubs = mkdtempSync(join(tmpdir(), 'phi-guard-sudo-'));
   try {
-    writeFileSync(join(stubs, 'sudo'), '#!/bin/sh\necho "sudo $*"\n');
+    // Prints each argument in brackets, so an empty argument is visible.
+    writeFileSync(join(stubs, 'sudo'), '#!/bin/sh\nprintf sudo; for arg in "$@"; do printf " [%s]" "$arg"; done; echo\n');
     chmodSync(join(stubs, 'sudo'), 0o755);
-    const run = (value: string) =>
+    const run = (firewall: string, extraHosts: string) =>
       execFileSync('sh', ['-c', devcontainer.postStartCommand], {
         encoding: 'utf8',
-        env: { PATH: `${stubs}:${process.env.PATH}`, PHI_GUARD_FIREWALL: value },
+        env: { PATH: `${stubs}:${process.env.PATH}`, PHI_GUARD_FIREWALL: firewall, PHI_GUARD_EXTRA_HOSTS: extraHosts },
       });
 
-    assert.equal(run('on'), 'sudo /usr/local/bin/init-firewall.sh\n');
-    assert.equal(run(''), 'sudo /usr/local/bin/init-firewall.sh\n');
-    assert.equal(run('off'), 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)\n');
+    assert.equal(run('on', ''), 'sudo [/usr/local/bin/init-firewall.sh] []\n');
+    assert.equal(run('', 'a.example.com,b.example.com'), 'sudo [/usr/local/bin/init-firewall.sh] [a.example.com,b.example.com]\n');
+    assert.equal(run('off', 'a.example.com'), 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)\n');
   } finally {
     rmSync(stubs, { recursive: true, force: true });
   }
+});
+
+test('the host ~/.aws and ~/.npmrc are bind-mounted read-only, so the agent cannot plant a credential_process', () => {
+  const mounts: string[] = devcontainer.mounts;
+  for (const name of ['.aws', '.npmrc']) {
+    assert.ok(
+      mounts.includes(`source=\${localEnv:HOME}/${name},target=/home/node/${name},type=bind,readonly`),
+      `${name} mount`,
+    );
+  }
+});
+
+test('initializeCommand creates the mount sources and leaves an existing ~/.npmrc alone', () => {
+  const home = mkdtempSync(join(tmpdir(), 'phi-guard-home-'));
+  try {
+    writeFileSync(join(home, '.npmrc'), 'fake-line\n');
+    execFileSync('sh', ['-c', devcontainer.initializeCommand], { env: { PATH: process.env.PATH, HOME: home } });
+    assert.ok(statSync(join(home, '.aws')).isDirectory());
+    assert.equal(readFileSync(join(home, '.npmrc'), 'utf8'), 'fake-line\n');
+
+    rmSync(join(home, '.npmrc'));
+    execFileSync('sh', ['-c', devcontainer.initializeCommand], { env: { PATH: process.env.PATH, HOME: home } });
+    assert.ok(existsSync(join(home, '.npmrc')));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Sources the firewall script, which only defines functions then, and calls one.
+const callFirewallFunction = (fn: string, arg: string) => {
+  const script = fileURLToPath(new URL('.devcontainer/init-firewall.sh', root));
+  const result = spawnSync('bash', ['-c', 'source "$1" && shift && "$@"', 'bash', script, fn, arg], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return { hosts: result.stdout.split('\n').filter(Boolean), warnings: result.stderr };
+};
+
+const withFile = (content: string, check: (path: string) => void) => {
+  const dir = mkdtempSync(join(tmpdir(), 'phi-guard-fw-'));
+  try {
+    const path = join(dir, 'file');
+    writeFileSync(path, content);
+    check(path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+test('the firewall derives SSO hosts from each valid sso_region in the AWS config', () => {
+  const config = [
+    '[default]',
+    'region = us-east-1',
+    '[profile phi-guard]',
+    'sso_session = corp',
+    'sso_account_id = 123456789012',
+    '[sso-session corp]',
+    'sso_start_url = https://example.awsapps.com/start',
+    'sso_region = us-east-2',
+    '[profile other]',
+    '  sso_region = eu-west-1  ',
+    'sso_region = us-east-2',
+    'sso_region = evil.com;rm -rf /',
+    '',
+  ].join('\n');
+  withFile(config, (path) => {
+    const { hosts, warnings } = callFirewallFunction('sso_hosts_from_config', path);
+    assert.deepEqual(hosts, [
+      'portal.sso.eu-west-1.amazonaws.com',
+      'oidc.eu-west-1.amazonaws.com',
+      'portal.sso.us-east-2.amazonaws.com',
+      'oidc.us-east-2.amazonaws.com',
+    ]);
+    assert.match(warnings, /invalid sso_region 'evil\.com;rm -rf \/'/);
+  });
+  assert.deepEqual(callFirewallFunction('sso_hosts_from_config', '/nonexistent/config'), { hosts: [], warnings: '' });
+});
+
+test('the firewall derives only CodeArtifact registry hosts from the npmrc and never prints a token', () => {
+  const npmrc = [
+    'registry=https://corp-123456789012.d.codeartifact.us-east-2.amazonaws.com/npm/repo/',
+    '@acme:registry="https://acme-123456789012.d.codeartifact.eu-west-1.amazonaws.com/npm/other/"',
+    '//corp-123456789012.d.codeartifact.us-east-2.amazonaws.com/npm/repo/:_authToken=fake-token-do-not-print',
+    '@evil:registry=https://evil.example.com/npm/',
+    'registry=https://corp-123456789012.d.codeartifact.us-east-2.amazonaws.com.evil.com/npm/',
+    'registry=http://corp-123456789012.d.codeartifact.us-east-2.amazonaws.com/npm/',
+    '',
+  ].join('\n');
+  withFile(npmrc, (path) => {
+    const result = callFirewallFunction('codeartifact_hosts_from_npmrc', path);
+    assert.deepEqual(result, {
+      hosts: [
+        'acme-123456789012.d.codeartifact.eu-west-1.amazonaws.com',
+        'corp-123456789012.d.codeartifact.us-east-2.amazonaws.com',
+      ],
+      warnings: '',
+    });
+  });
+  assert.deepEqual(callFirewallFunction('codeartifact_hosts_from_npmrc', '/nonexistent/.npmrc'), { hosts: [], warnings: '' });
+});
+
+test('the firewall accepts only plain hostnames from PHI_GUARD_EXTRA_HOSTS', () => {
+  const { hosts, warnings } = callFirewallFunction(
+    'extra_hosts_from_list',
+    'pypi.example.com, files-123456789012.example.com ,evil.com;rm -rf /,https://x/y,*.foo,host:443,,under_score.com,',
+  );
+  assert.deepEqual(hosts, ['pypi.example.com', 'files-123456789012.example.com']);
+  for (const rejected of ['evil.com;rm -rf /', 'https://x/y', '*.foo', 'host:443', 'under_score.com']) {
+    assert.ok(warnings.includes(`'${rejected}'`), rejected);
+  }
+  assert.deepEqual(callFirewallFunction('extra_hosts_from_list', ''), { hosts: [], warnings: '' });
 });

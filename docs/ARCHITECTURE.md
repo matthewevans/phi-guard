@@ -15,7 +15,7 @@ defeat them. Failure behavior below says where.
 flowchart LR
   dev([Developer])
 
-  subgraph container["Dev container: egress firewall, no host secrets, no MCP"]
+  subgraph container["Dev container: egress firewall, host ~/.aws and ~/.npmrc read-only, no MCP"]
     cc["Claude Code<br/>(personal subscription)"]
     cx["Codex CLI<br/>(danger-full-access)"]
     ph[["prompt hooks<br/>UserPromptSubmit"]]
@@ -164,7 +164,8 @@ PostToolUse scans `tool_response` directly.
 | Way PHI could reach the model | Control | Claude Code | Codex |
 |---|---|---|---|
 | Live systems (DBs, Jira, log tools) | Container egress firewall | Covered, for IPv4, while the firewall is on | Covered, for IPv4, while the firewall is on |
-| Host secrets and config (`~/.aws`, `~/.ssh`, MCP config) | Container boundary | Covered | Covered |
+| Host secrets and config other than the mounted `~/.aws` and `~/.npmrc` (`~/.ssh`, MCP config) | Container boundary | Covered | Covered |
+| PHI data stores reached with the mounted AWS credentials | Container egress firewall, then the credentials' own permissions | Covered, for IPv4, while the firewall is on, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` | Covered, for IPv4, while the firewall is on, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` |
 | Committed fixtures and history | Policy: no PHI committed; shallow clone | Covered by policy | Covered by policy |
 | Text the developer types or pastes | Prompt hook (block) | Covered, limited by detection | Covered, limited by detection |
 | Command output (tests, scripts) | Output hook (mask) | Covered for the `Bash` tool, limited by detection | Covered for the `Bash` tool through the wrapper, limited by detection |
@@ -260,8 +261,12 @@ Container:
 | IPv4 only | The firewall writes no IPv6 rules. If the Docker network gives the container IPv6, all IPv6 egress is unfiltered. Docker's default bridge has no IPv6 |
 | Reference firewall rules that stay | Outbound DNS (UDP 53) to any resolver, outbound SSH (TCP 22) to any host, and the host's /24 network are allowed, as in Anthropic's reference |
 | `PHI_GUARD_FIREWALL=off` | No egress boundary at all. Only the exact value `off` skips the firewall, and the value is fixed when the container is created |
-| `/home/node` is writable by the agent | This covers `~/.aws/config`, agent state and any shell startup files. Endpoint redirection through `~/.aws/config` or `AWS_ENDPOINT_URL*` is neutralised by endpoint pinning. The credential strategy is Part 2, and the agent can read whatever credentials the container holds |
-| Repo-shipped enforcement | `.devcontainer/` (managed settings, `requirements.toml`, `init-firewall.sh`, `devcontainer.json`) and `dist/` live in `/workspace`, which the agent and anyone with repo write access can edit. Edits take effect at the next container start or rebuild and can remove the hooks, the managed settings or the firewall, including by changing `PHI_GUARD_FIREWALL`. Review `.devcontainer/` and `dist/` changes before rebuilding. Policy that engineers must not bypass belongs in server-managed settings or MDM |
+| `/home/node` is writable by the agent | This covers agent state and any shell startup files. `~/.aws` and `~/.npmrc` are read-only mounts (see the next rows). Endpoint redirection through a profile's `endpoint_url` or `AWS_ENDPOINT_URL*` is neutralised by endpoint pinning |
+| The agent can read the engineer's AWS and npm credentials | `devcontainer.json` mounts the host `~/.aws` (every profile, SSO token cache and any static keys in it) and `~/.npmrc` (registry tokens). Everything the engineer's credentials can do is available to the agent, not only `bedrock:ApplyGuardrail`. With the firewall on, egress reaches the allowlist (GitHub, npm, the model providers, Bedrock, STS, SSO, the allowlisted CodeArtifact hosts, the VS Code hosts and every `PHI_GUARD_EXTRA_HOSTS` entry), plus the reference DNS, SSH and host-network rules. With `PHI_GUARD_FIREWALL=off` the credentials reach any AWS service, including PHI data stores. A token the agent reads, for example while debugging npm auth, lands in the model provider's transcript |
+| Read-only credential mounts | Both mounts are `readonly`, so the agent cannot edit the host's `~/.aws/config` or `~/.npmrc`, for example to plant a `credential_process` that a host tool later runs. The bundled AWS SDK ignores SSO token-cache write errors (from its source, not run against a real SSO session), so a token refresh inside the container works without persisting |
+| Derived firewall hosts are read at start | The firewall reads `portal.sso.<region>` and `oidc.<region>` for each `sso_region` in `~/.aws/config`, the host of each CodeArtifact `registry=` URL in `~/.npmrc`, and the hostnames in `PHI_GUARD_EXTRA_HOSTS`. Entries that are not valid are skipped with a warning, and a host that does not resolve is skipped with a warning. After changing `~/.aws/config` or `~/.npmrc`, restart the container. `PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created |
+| Expired AWS session | The scan fails with bad credentials, so prompts are blocked and output is withheld (fail closed) until the engineer refreshes the session on the host |
+| Repo-shipped enforcement | `.devcontainer/` (managed settings, `requirements.toml`, `init-firewall.sh`, `devcontainer.json`) and `dist/` live in `/workspace`, which the agent and anyone with repo write access can edit. Edits take effect at the next container start or rebuild and can remove the hooks, the managed settings or the firewall, including by changing `PHI_GUARD_FIREWALL`, and an edited `initializeCommand` runs on the host. Review `.devcontainer/` and `dist/` changes before rebuilding. Policy that engineers must not bypass belongs in server-managed settings or MDM |
 | Same-uid tampering | Anything that runs as uid `node`, and any repo or user settings `env`, can make the hooks fail open (both agents). See the same-uid rows in the Claude failure table and the Codex residuals table above |
 | Reference devcontainer license | The Dockerfile, `devcontainer.json` and `init-firewall.sh` are adapted from Anthropic's reference (© Anthropic PBC, subject to Anthropic's Commercial Terms of Service). Attribution is kept in each file header and in `.devcontainer/LICENSE-anthropic-reference.md` |
 
@@ -338,8 +343,9 @@ invalid one.
 
 - **Ownership.** The CLIs (a root-owned global npm prefix), `/opt/phi-guard`,
   `/etc/claude-code`, `/etc/codex` and `/etc/zsh` are root-owned, so the agent
-  cannot rewrite them. `/home/node` (shell startup files, `~/.aws/config`, agent
-  state) and `/workspace` are writable by the agent.
+  cannot rewrite them. `/home/node` (shell startup files, agent state) and
+  `/workspace` are writable by the agent. The mounted `~/.aws` and `~/.npmrc` are
+  read-only.
 - **Codex sandbox.** Codex runs with `danger-full-access`. The container is the
   boundary, as it is for Claude Code, which has no OS sandbox here either. Docker's
   default seccomp profile blocks the namespaces Codex's bubblewrap sandbox needs,
@@ -347,14 +353,21 @@ invalid one.
   bubblewrap. `allowed_sandbox_modes` lists `read-only` and `danger-full-access`
   (Codex rejects a list without `read-only`). Read-only stays selectable and fails
   closed, as the Codex table says.
+- **Host credentials.** `initializeCommand` creates `~/.aws` and an empty `~/.npmrc`
+  on the host when they are missing, because Docker refuses to start a container whose
+  bind source does not exist. `devcontainer.json` then mounts both read-only. The
+  `phi-guard` profile named by `aws_profile` lives in the engineer's own
+  `~/.aws/config` (an SSO profile whose role allows `bedrock:ApplyGuardrail`). The
+  engineer refreshes sessions on the host.
 - **Firewall allowlist.** GitHub's published ranges, `registry.npmjs.org`, the
   Anthropic hosts (`api.anthropic.com`, `claude.ai`, `claude.com`,
   `platform.claude.com`), the OpenAI hosts Codex needs (`api.openai.com`,
   `chatgpt.com`, `auth.openai.com`), `bedrock-runtime.<region>.amazonaws.com`,
-  `sts.<region>.amazonaws.com`, and the VS Code hosts from the reference. The
-  Sentry and Statsig telemetry hosts from the reference are dropped. Codex hosts
-  seen rarely in its source (`ab.chatgpt.com`, `files.openai.com`) are not
-  allowed. Part 2 checks whether Codex login needs them.
+  `sts.<region>.amazonaws.com`, and the VS Code hosts from the reference. Optional
+  hosts are added from the mounted credential files and `PHI_GUARD_EXTRA_HOSTS` (see
+  the Container table). The Sentry and Statsig telemetry hosts from the reference are
+  dropped. Codex hosts seen rarely in its source (`ab.chatgpt.com`,
+  `files.openai.com`) are not allowed. Part 2 checks whether Codex login needs them.
 - **Turning the firewall off.** `devcontainer.json` passes `PHI_GUARD_FIREWALL`
   from the host environment into the container, default `on`. Only the exact value
   `off` makes `postStartCommand` skip the firewall script. The value is fixed when
@@ -363,10 +376,9 @@ invalid one.
   `postStartCommand` re-runs the script in a fresh network namespace. Re-running it
   in place is not supported.
 - **Placeholders.** `REPLACE_IN_PART_2_*` values appear in
-  `.devcontainer/Dockerfile` (the `PHI_GUARD_*` variables),
-  `.devcontainer/claude-code/phi-guard.json` and `.devcontainer/aws-config`.
-  `test/devcontainer.test.ts` checks that the three agree. Until they are replaced
-  every scan fails and the hooks fail closed.
+  `.devcontainer/Dockerfile` (the `PHI_GUARD_*` variables) and
+  `.devcontainer/claude-code/phi-guard.json`. `test/devcontainer.test.ts` checks that
+  the two agree. Until they are replaced every scan fails and the hooks fail closed.
 - **Shell.** `SHELL=/bin/zsh` and `ZDOTDIR=/etc/zsh` serve interactive terminals.
   Because zsh looks for its startup files in root-owned `/etc/zsh`, users'
   `~/.zshrc` and other dotfiles are ignored and zsh keeps no history (`HISTFILE` is
@@ -415,8 +427,16 @@ Part 1 had no AWS access. Nothing below is claimed to work.
    assumed.
 5. Real latency per call and throttling behavior, including Service Quotas for
    text units per second. For Codex, hook latency against the 20s hook timeout.
+6. The host-credential setup against the real `good-morning` flow: the SSO login and
+   token refresh inside the container (`portal.sso` and `oidc` as the only extra
+   hosts needed), and CodeArtifact npm installs, including whether package downloads
+   use any host beyond the repository endpoint. pip and other CodeArtifact tools need
+   `PHI_GUARD_EXTRA_HOSTS`. Also whether a host tool that replaces `~/.npmrc` instead
+   of editing it in place leaves the container's single-file mount on the old file
+   (inferred, not verified), and whether the files are readable by uid `node` on a
+   Linux host.
 
 Also open: a Codex PostToolUse run that masks a fake member ID against the real
 guardrail, Codex managed requirements behavior inside the running container
-(including the empty MCP allowlist against a real server), the credential
-strategy for the container, and the real guardrail values in the placeholders.
+(including the empty MCP allowlist against a real server), and the real guardrail
+values in the placeholders.

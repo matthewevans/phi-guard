@@ -35,17 +35,21 @@
     }
   },
   "remoteUser": "node",
+  "initializeCommand": "mkdir -p \"$HOME/.aws\" && touch \"$HOME/.npmrc\"",
   "mounts": [
     "source=claude-code-config-${devcontainerId},target=/home/node/.claude,type=volume",
-    "source=codex-config-${devcontainerId},target=/home/node/.codex,type=volume"
+    "source=codex-config-${devcontainerId},target=/home/node/.codex,type=volume",
+    "source=${localEnv:HOME}/.aws,target=/home/node/.aws,type=bind,readonly",
+    "source=${localEnv:HOME}/.npmrc,target=/home/node/.npmrc,type=bind,readonly"
   ],
   "containerEnv": {
     "NODE_OPTIONS": "--max-old-space-size=4096",
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
-    "PHI_GUARD_FIREWALL": "${localEnv:PHI_GUARD_FIREWALL:on}"
+    "PHI_GUARD_FIREWALL": "${localEnv:PHI_GUARD_FIREWALL:on}",
+    "PHI_GUARD_EXTRA_HOSTS": "${localEnv:PHI_GUARD_EXTRA_HOSTS:}"
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
-  "postStartCommand": "if [ \"$PHI_GUARD_FIREWALL\" = off ]; then echo 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)'; else sudo /usr/local/bin/init-firewall.sh; fi",
+  "postStartCommand": "if [ \"$PHI_GUARD_FIREWALL\" = off ]; then echo 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)'; else sudo /usr/local/bin/init-firewall.sh \"$PHI_GUARD_EXTRA_HOSTS\"; fi",
   "waitFor": "postStartCommand"
 }

@@ -6,10 +6,10 @@ plugin for both agents plus a reference dev container.
 
 The sandbox is the boundary: the container runs the agent on the repo you open in
 it (a shallow clone is the intended setup, which the container does not enforce)
-with an egress firewall and no host credentials. The hooks are a safety net for human
-error. A prompt hook blocks prompts that contain PHI, and an output hook masks PHI
-in shell command output before the model sees it. Both call Amazon Bedrock
-Guardrails `ApplyGuardrail` in your BAA-covered AWS account. When a scan fails for
+with an egress firewall and your host `~/.aws` and `~/.npmrc` mounted read-only. The
+hooks are a safety net for human error. A prompt hook blocks prompts that contain
+PHI, and an output hook masks PHI in shell command output before the model sees it.
+Both call Amazon Bedrock Guardrails `ApplyGuardrail` in your BAA-covered AWS account. When a scan fails for
 any reason the prompt is blocked or the output is withheld. That holds in
 phi-guard's own code. The hooks run as the same user as the agent, and
 ARCHITECTURE.md lists where the host itself fails open.
@@ -49,9 +49,20 @@ Open the repo in the dev container (`.devcontainer/`). It installs both CLIs and
 the plugin, and enforces the hooks through managed settings for Claude Code and
 `requirements.toml` for Codex. Codex runs with `danger-full-access` because the
 container is its boundary. The `REPLACE_IN_PART_2_*` placeholders in
-`.devcontainer/Dockerfile`, `.devcontainer/claude-code/phi-guard.json` and
-`.devcontainer/aws-config` need real guardrail values before the hooks can scan.
-The firewall will not start until a real region is set there.
+`.devcontainer/Dockerfile` and `.devcontainer/claude-code/phi-guard.json` need real
+guardrail values before the hooks can scan. The firewall will not start until a real
+region is set there.
+
+The container mounts your host `~/.aws` and `~/.npmrc` read-only. The hooks call
+Bedrock with the `phi-guard` profile, so add a `[profile phi-guard]` to your
+`~/.aws/config`: an SSO profile whose role allows `bedrock:ApplyGuardrail` on the
+guardrail. Refresh credentials on the host (`aws sso login`, CodeArtifact login). An
+expired session blocks prompts until you do. At start the firewall also allows the
+SSO hosts named in your `~/.aws/config` and the CodeArtifact hosts in the `registry=`
+lines of your `~/.npmrc`. For other hosts, such as a CodeArtifact endpoint for pip,
+set `PHI_GUARD_EXTRA_HOSTS` to a comma-separated list of hostnames in the host
+environment. A listed host is reachable with all of your mounted credentials. Restart the container after changing `~/.aws/config` or `~/.npmrc`.
+`PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created.
 
 To start the container without the egress firewall, set `PHI_GUARD_FIREWALL=off`
 in the host environment before opening it. Only the exact value `off` skips the

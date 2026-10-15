@@ -1,4 +1,0 @@
-# Placeholder profile named by the managed plugin options. The credential
-# strategy is decided in Part 2; nothing secret belongs in this file.
-[profile phi-guard]
-region = REPLACE_IN_PART_2_AwsRegion
