@@ -35,6 +35,14 @@ export function createScanner(
       { guardrailIdentifier, guardrailVersion, source, content: [{ text: { text } }] },
       AbortSignal.timeout(SCAN_TIMEOUT_MS),
     );
+    // Text beyond the guardrail's size quota goes unscanned without an error, so a
+    // partial scan must not look like a clean one.
+    const { guarded, total } = response.guardrailCoverage?.textCharacters ?? {};
+    if (total !== undefined && (guarded ?? 0) < total) {
+      throw Object.assign(new Error(`the guardrail scanned ${guarded ?? 0} of ${total} characters`), {
+        name: 'PartialGuardrailCoverage',
+      });
+    }
     if (response.action !== 'GUARDRAIL_INTERVENED') {
       return { intervened: false, text, findings: [] };
     }

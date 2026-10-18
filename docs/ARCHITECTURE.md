@@ -208,6 +208,8 @@ Claude Code:
 | Guardrail flags PHI | Blocks the prompt | Masks the values |
 | AWS error, throttling, bad credentials | Blocks (own catch) | Withholds output (own catch) |
 | Scan slower than 10s | Blocks (AbortSignal) | Withholds (AbortSignal) |
+| The guardrail scanned fewer characters than were sent (text over its size quota) | Blocks (`PartialGuardrailCoverage`) | Withholds (`PartialGuardrailCoverage`) |
+| The response omits `guardrailCoverage`, so a partial scan cannot be seen (unverified whether the API ever omits it) | **Fails open** for that prompt | **Fails open** for that output |
 | Hook crashes or exceeds 20s | Blocks (`onFailure: "block"`) | **Fails open**: `onFailure` can't withhold PostToolUse output |
 | Replacement output has the wrong shape | n/a | **Fails open**: Claude Code ignores it. The hook spreads the original fields, and `scripts/e2e.sh` checks this |
 | Same-uid tampering: anything that runs as the agent's uid, or a project or user settings `env`, alters the hook's inputs. Demonstrated: project `.claude/settings.json` `env.LD_PRELOAD` (needs only a committed repo file), and `PATH` and `NODE_OPTIONS` before they were pinned. Likely, not run: `env` `AWS_CONFIG_FILE` or credential variables pointing at another account's guardrail. Also user-level agent config and a killed hook process | **Can fail open** for every later prompt in the session. A substituted `node` that exits 0 with no output is not a failure | **Can fail open** for every later command in the session |
@@ -228,6 +230,8 @@ its own 15s deadline under the 20s hook timeout.
 | Guardrail flags PHI | Blocks the prompt | n/a | Replaces the result with the masked text |
 | AWS error, throttling, bad credentials, missing config | Blocks (own catch) | n/a, it reads no config | Withholds (own catch) |
 | Scan slower than 10s | Blocks (AbortSignal) | n/a | Withholds (AbortSignal) |
+| The guardrail scanned fewer characters than were sent | Blocks (`PartialGuardrailCoverage`) | n/a | Withholds (`PartialGuardrailCoverage`). A scan is at most about 20 KB here, far under the quota |
+| The response omits `guardrailCoverage` (unverified) | **Fails open** for that prompt | n/a | **Fails open** for that output |
 | Own 15s deadline | Blocks | Exit 2: the command is blocked and never runs | Withholds |
 | Entrypoint exits non-zero (crash, `node` missing) | Exit 2 guard blocks | Exit 2 guard blocks the command | Exit 2 guard blocks |
 | Capture file missing, unreadable, or unsafe (symlink, other owner, extra hard links, not a regular file) | n/a | n/a | Withholds, naming the cause |
@@ -481,9 +485,78 @@ Residuals:
   identifiers. It does not catch diagnoses or clinical free text.
 - Member IDs and claim numbers are caught by **your** regexes, configured as
   CloudFormation parameters at deploy time.
-- There is no date-of-birth type. A regex catches DOB-named keys with a date value.
+- There is no date type. The `PersonDate` regex catches a date next to a key that ties it
+  to a person: birth, admission or admit, discharge, service or DOS, death. A bare date
+  (a timestamp, a changelog entry, a written-out birthday) is left alone. Deploying
+  `infra/guardrail.yaml` with `DatePolicy=All` as a second stack also masks any full date
+  with a month and day, and `pnpm eval` compares the two (see [Evals](#evals)).
+- **Size limit.** `ApplyGuardrail` scans at most 1,000 text units (about 1,000,000
+  characters) of sensitive-information input in the large US Regions and 106 (about
+  106,000 characters) elsewhere. For larger text the API reports how many
+  characters it guarded and raises no error. The scanner turns a shortfall into `PartialGuardrailCoverage`,
+  so both hooks fail closed: a prompt over the limit is blocked and a Claude command
+  output over it is withheld. Codex already caps each scan at a 20 KB head and tail, so
+  this applies to the Claude path. The quotas and the report fields come from AWS
+  documentation and are unverified here; `pnpm eval` brackets both quotas.
 - URL, IP_ADDRESS, AGE, USERNAME and PASSWORD are off because they're noisy in dev
   output.
+
+## Evals
+
+`pnpm eval` (`evals/`) scans a labelled synthetic corpus through the shipped Claude hook
+bundles against real guardrails. It spawns `dist/bash-output.mjs` for every case and
+`dist/prompt.mjs` for prompt-shaped cases (prose and tickets), with the command, args and
+timeout from `hooks/hooks.json` and the stdin JSON and `CLAUDE_PLUGIN_OPTION_*` environment
+Claude Code provides. Codex shares the scanner core, so detection quality is the same;
+the Codex contract stays covered by `pnpm e2e`. It assumes Claude Code passes a command's
+full stdout to the PostToolUse hook, which is unverified.
+
+- **Corpus.** About 540 positives and 110 negatives, generated from a fixed seed, plus five
+  size probes. A positive plants atomic values (first name, last name, street, city, ZIP,
+  each date, each number) in record-shaped dev data: prose prompts, log lines, JSON,
+  CSV, psql tables, HL7 v2 PID, FHIR Patient, stack traces and tickets. A negative is
+  dev output that only looks like an identifier: git authors, timestamps, changelog dates,
+  UUIDs, ARNs, versions, test cards in SDK test code, code that names patient fields,
+  DDL, package output and access logs.
+- **Labels.** Each planted value is labelled by the HIPAA Safe Harbor identifier list. A
+  category is `detectable` (an entity type or fixed regex in the template covers it),
+  `overlay` (only a parameterised regex covers it: member IDs and claim numbers, whose
+  cases come from the gitignored `evals/local/*.jsonl`) or `gap`. The gaps are age over 89,
+  medical record numbers, patient account numbers, device identifiers, URLs and IP addresses. They are reported as
+  gaps, never as failures. `test/evals.test.ts` keeps the labels in step with the template.
+- **Outcomes.** On the output surface a value is caught when it is absent from the masked
+  text and leaked when it survives, counted by planted value and reported by case id and
+  index. Only masked and unchanged outputs count toward value recall: an output the
+  guardrail withheld wholesale says nothing about any one value, so it is reported as a
+  withheld total instead. Gap categories are left out of the headline and by-format recall
+  and keep their own rows, and a prompt positive counts only when it plants at least one
+  value outside a gap category. A negative is a false positive when the output is altered
+  or withheld. Scan errors are counted
+  apart by name (`ThrottlingException` among them) and are never catches or false
+  positives. A prompt positive is caught when blocked with every expected type named. The
+  report also records the mask tags that appear (evidence for the `{TYPE}` format) and the
+  outputs the guardrail replaces with its blocked message (evidence for how `OutputAction`
+  and the legacy `Action` interact).
+- **Metrics.** Each surface has an overview per target: cases, recall and false-positive rate
+  (each with a Wilson 95% interval), errors by name, hook latency p50, p95 and max (process
+  start and credential resolution included, against the 20 s hook timeout), and text units
+  with estimated cost. The output overview adds the withheld total and the mask tags seen,
+  and the prompt overview adds blocks that missed an expected type and reported types the
+  template does not define. The output tables break this down further: by category and
+  sub-category (coverage, values, recall with interval, leaked values, withheld cases) and by
+  format (cases, recall, false-positive rate, withheld, errors). The prompt surface has a
+  by-category table (cases, recall, type misses). The Wilson intervals assume independent
+  values, but values cluster within a case, so they are likely too narrow.
+- **Size probes.** Five mixed-log cases (about 10, 100, 110, 990 and 1,010 thousand
+  characters) with a value planted in the final 5%, bracketing both quotas in
+  [Detection limits](#detection-limits). They have their own table. An error there, such as an
+  over-quota rejection, is the measurement and does not fail the run, but output the evals
+  cannot read still does.
+- **Residuals.** The corpus is synthetic and generated, so recall describes the guardrail
+  on this shape of data, and real records may differ. It cannot see linkage to a person's care.
+  Format-valid generated SSNs could coincide with real numbers, which is why they are a
+  sub-category of their own. A name inside a stack trace or a pipe-delimited message may
+  go undetected, and the evals report how often.
 
 ## Cost (Guardrails PII filter at $0.10 per 1,000 text units; regexes free)
 
@@ -502,17 +575,22 @@ about 20 text units (the 20,000-byte bound), roughly $0.002 at the rate above.
 
 Part 1 had no AWS access. Nothing below is claimed to work.
 
-1. The regex dialect Guardrails accepts. The `DateOfBirth` pattern avoids inline
-   flags and uses only portable syntax.
+1. The regex dialect Guardrails accepts. The `PersonDate` pattern avoids inline
+   flags and lookarounds and uses only portable syntax; `pnpm eval` shows whether it
+   matches.
 2. Whether `InputAction` and `OutputAction` take precedence over the legacy
    required `Action` (set to BLOCK). Prompts are safe either way, because the
-   hook blocks on any intervention.
+   hook blocks on any intervention. `pnpm eval` shows it: a masked output means the
+   output action applied, and an output equal to the blocked message means `Action`
+   won.
 3. That the IAM resource for `bedrock:ApplyGuardrail` is the guardrail ARN from
    `GetAtt GuardrailArn`.
 4. The masked tag format. `{NAME}` for PII and `{MemberId}` for regexes are
-   assumed.
+   assumed. `pnpm eval` lists the tags it sees.
 5. Real latency per call and throttling behavior, including Service Quotas for
    text units per second. For Codex, hook latency against the 20s hook timeout.
+   `pnpm eval` reports Claude hook latency and errors by name, and its size probes show
+   how the API treats text over each quota.
 6. The host-credential setup against the real `good-morning` flow: the SSO login and
    token refresh inside the container (`portal.sso` and `oidc` as the only extra
    hosts needed), and CodeArtifact npm installs, including whether package downloads
@@ -528,6 +606,10 @@ Part 1 had no AWS access. Nothing below is claimed to work.
    `ResourceNotFoundException` means it is permitted. That assumes IAM is evaluated
    before the guardrail lookup, which is likely but unverified for this API. If the
    permission is missing, attach `ApplyGuardrailPolicy` to the permission set.
+8. That `ApplyGuardrail` responses carry `guardrailCoverage.textCharacters` and report a
+   shortfall for text over the size quota. The scanner fails closed on a shortfall and
+   passes a response without the field (see the failure table), so the size probes in
+   `pnpm eval` must show a `PartialGuardrailCoverage` error above the quota.
 
 Also open: the launcher's health-check pass path (that `devcontainer exec` prints
 nothing on stdout when the guardrail answers), which is verified only against stubs

@@ -1,11 +1,8 @@
 // Runs the bundled hook entrypoints (dist/*.mjs, the shipped artifact) as Claude Code
 // would, to prove every failure path blocks or withholds rather than passing through.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-
-// Stripped so a developer's own AWS or phi-guard setup can't leak into the runs.
-const AMBIENT_CONFIG = /^(CLAUDE_PLUGIN_OPTION_|PHI_GUARD_|AWS_)/;
+import { spawnHook } from './hook-process.ts';
 
 // Obviously fake options, with no credentials anywhere, so the scan itself fails.
 const fakeOptions = {
@@ -17,15 +14,7 @@ const fakeOptions = {
 };
 
 function runHook(script: string, stdin: string, extraEnv: Record<string, string> = {}) {
-  const env = {
-    ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !AMBIENT_CONFIG.test(name))),
-    ...extraEnv,
-  };
-  const result = spawnSync('node', [new URL(`../dist/${script}`, import.meta.url).pathname], {
-    input: stdin,
-    env,
-    encoding: 'utf8',
-  });
+  const result = spawnHook(script, stdin, extraEnv);
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }

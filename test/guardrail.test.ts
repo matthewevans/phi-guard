@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ApplyGuardrailCommandInput, ApplyGuardrailCommandOutput } from '@aws-sdk/client-bedrock-runtime';
 import { createScanner, readConfig } from '../src/guardrail.ts';
+import { maskBashOutput } from '../src/hooks/bash-output.ts';
+import { checkPrompt } from '../src/hooks/prompt.ts';
 
 function scannerReturning(response: Partial<ApplyGuardrailCommandOutput>) {
   const calls: ApplyGuardrailCommandInput[] = [];
@@ -59,6 +61,32 @@ test('propagates guardrail errors so hooks can fail closed', async () => {
     '2',
   );
   await assert.rejects(scan('text', 'INPUT'), { name: 'ThrottlingException' });
+});
+
+const coverage = (guarded: number, total: number) => ({ textCharacters: { guarded, total } });
+
+test('treats a complete scan as a scan', async () => {
+  const { scan } = scannerReturning({ action: 'NONE', guardrailCoverage: coverage(5, 5) });
+  assert.deepEqual(await scan('hello', 'OUTPUT'), { intervened: false, text: 'hello', findings: [] });
+});
+
+for (const action of ['NONE', 'GUARDRAIL_INTERVENED'] as const) {
+  test(`rejects with PartialGuardrailCoverage when a ${action} scan covered fewer characters than sent`, async () => {
+    const { scan } = scannerReturning({ action, outputs: [{ text: 'masked' }], guardrailCoverage: coverage(3, 5) });
+    await assert.rejects(scan('hello', 'OUTPUT'), { name: 'PartialGuardrailCoverage', message: /3 of 5 characters/ });
+  });
+}
+
+test('treats a coverage report without a guarded count as nothing scanned', async () => {
+  const { scan } = scannerReturning({ action: 'NONE', guardrailCoverage: { textCharacters: { total: 5 } } });
+  await assert.rejects(scan('hello', 'OUTPUT'), { name: 'PartialGuardrailCoverage', message: /0 of 5 characters/ });
+});
+
+test('a partial scan fails both hooks, whose entrypoints turn any scan error into a block or a withheld output', async () => {
+  const { scan } = scannerReturning({ action: 'NONE', guardrailCoverage: coverage(3, 5) });
+  await assert.rejects(checkPrompt('hello', scan), { name: 'PartialGuardrailCoverage' });
+  const response = { stdout: 'hello', stderr: '', interrupted: false, isImage: false };
+  await assert.rejects(maskBashOutput(response, scan), { name: 'PartialGuardrailCoverage' });
 });
 
 const sentinel = 'fake-sentinel-value';

@@ -19,6 +19,15 @@ Parameters:
   ClaimNumberPattern:
     Type: String
     Description: Regex for your claim number format. No default, so a placeholder can't ship.
+  DatePolicy:
+    Type: String
+    Default: Keyed
+    AllowedValues: [Keyed, All]
+    Description: >-
+      Keyed masks a date only next to a key naming a person's birth, admission,
+      discharge, service or death. All also masks any full date with a month and
+      day (ISO, US slash, or written out). Deploy a second stack with All to compare
+      the two with pnpm eval.
   VersionDescription:
     Type: String
     Default: v1
@@ -27,11 +36,14 @@ Parameters:
       version after editing the guardrail, then update the plugin's guardrail_version
       option (Codex env var PHI_GUARD_GUARDRAIL_VERSION).
 
+Conditions:
+  AllDates: !Equals [!Ref DatePolicy, All]
+
 Resources:
   Guardrail:
     Type: AWS::Bedrock::Guardrail
     Properties:
-      Name: phi-guard
+      Name: !Ref AWS::StackName
       Description: Blocks PHI in coding-agent prompts; masks it in command output.
       BlockedInputMessaging: 'phi-guard: prompt blocked, sensitive data detected.'
       BlockedOutputsMessaging: '[phi-guard: output withheld, sensitive data detected]'
@@ -66,11 +78,15 @@ Resources:
             Action: BLOCK
             InputAction: BLOCK
             OutputAction: ANONYMIZE
-          # The PII filter has no date-of-birth type. Bare dates are everywhere in
-          # logs, so this only matches a date assigned to a DOB-named key
-          # (dob, DOB, birthDate, birth_date, dateOfBirth, date_of_birth).
-          - Name: DateOfBirth
-            Pattern: '(?:[Dd][Oo][Bb]|[Bb]irth_?[Dd]ate|[Dd]ate_?[Oo]f_?[Bb]irth)["'']?\s*[:=]\s*["'']?\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}'
+          # The PII filter has no date type. Bare dates are everywhere in logs, so by
+          # default this only matches a date next to a key that ties it to a person:
+          # dob, birth date, admission or admit date, discharge date, service date or
+          # DOS, death date, in snake_case, camelCase or spaced forms. DatePolicy All
+          # appends one more alternative that matches any full date. The pattern avoids
+          # lookarounds and inline flags and stays under Bedrock's 500-character regex
+          # limit.
+          - Name: PersonDate
+            Pattern: !Join ['', ['(?:(?:[Bb]irth|[Aa]dmi(?:t|ssion|tted)|[Dd]ischarge|[Ss]ervice|[Dd]eath)[_ ]?[Dd]ate|[Dd]ate[_ ]?[Oo]f[_ ]?(?:[Bb]irth|[Ss]ervice|[Dd]eath)|[Dd][Oo][BbSs])["'']?\s*[:=|]?\s*["'']?(?:\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{1,2},? \d{4})', !If [AllDates, '|\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.? \d{1,2},? \d{4}', '']]]
             Action: BLOCK
             InputAction: BLOCK
             OutputAction: ANONYMIZE
@@ -86,7 +102,7 @@ Resources:
   ApplyGuardrailPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      Description: Allows only bedrock:ApplyGuardrail on the phi-guard guardrail.
+      Description: !Sub 'Allows only bedrock:ApplyGuardrail on the ${AWS::StackName} guardrail.'
       PolicyDocument:
         Version: '2012-10-17'
         Statement:

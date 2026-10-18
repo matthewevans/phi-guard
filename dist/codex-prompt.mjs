@@ -30760,6 +30760,12 @@ function createScanner(apply, guardrailIdentifier, guardrailVersion) {
       { guardrailIdentifier, guardrailVersion, source, content: [{ text: { text } }] },
       AbortSignal.timeout(SCAN_TIMEOUT_MS)
     );
+    const { guarded, total } = response.guardrailCoverage?.textCharacters ?? {};
+    if (total !== void 0 && (guarded ?? 0) < total) {
+      throw Object.assign(new Error(`the guardrail scanned ${guarded ?? 0} of ${total} characters`), {
+        name: "PartialGuardrailCoverage"
+      });
+    }
     if (response.action !== "GUARDRAIL_INTERVENED") {
       return { intervened: false, text, findings: [] };
     }

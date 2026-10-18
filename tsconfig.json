@@ -11,5 +11,5 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test", "scripts/e2e"]
+  "include": ["src", "test", "scripts/e2e", "evals"]
 }

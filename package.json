@@ -10,12 +10,14 @@
     "test": "node --test 'test/**/*.test.ts'",
     "build": "scripts/build.sh dist",
     "check": "scripts/check.sh",
-    "e2e": "scripts/e2e.sh"
+    "e2e": "scripts/e2e.sh",
+    "eval": "node evals/run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1149.0"
   },
   "devDependencies": {
+    "@faker-js/faker": "^10.6.0",
     "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"

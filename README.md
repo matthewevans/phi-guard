@@ -19,7 +19,10 @@ table and every known gap, in particular the Codex ones.
 
 ## Install
 
-Deploy `infra/guardrail.yaml` first. Its outputs give the guardrail ID and version.
+Deploy `infra/guardrail.yaml` first. Its outputs give the guardrail ID and version. The guardrail
+takes the stack's name, so the default stack name `phi-guard` keeps today's name, and a policy
+variant is a second stack (see [Evals](#evals)). AWS documents guardrail names as 1 to 50
+characters of letters, digits, hyphens and underscores, so the stack name must fit that.
 
 **Claude Code**
 
@@ -195,6 +198,45 @@ ones: prompts blocked, outputs withheld, and the masking paths proven with a
 test-only fake scanner. With the guardrail variables exported (see
 [Testing on a work machine](#testing-on-a-work-machine)) four more scenarios run
 against the real guardrail. `scripts/e2e.sh` lists each scenario and its expected result.
+
+## Evals
+
+`pnpm eval` measures what the shipped Claude hooks do with a real guardrail on a labelled,
+synthetic corpus: recall by Safe Harbor identifier category and format, false positives on
+dev output that only looks like identifiers, scan errors, hook latency, text units and
+estimated cost. It spawns `dist/bash-output.mjs` for every case and `dist/prompt.mjs` for
+prompt-shaped cases (prose and tickets) exactly as `hooks/hooks.json` registers them, so it
+is also the harness for the Part 2 checks on the regex dialect, the input and output
+actions, the mask tag format, latency and size limits. It makes no model calls and costs
+only the Guardrails text units (a full run is about 3,000 of them, roughly $0.30 per target).
+
+```
+pnpm eval --list                      # case ids, formats and categories, no network
+pnpm eval --case 'csv/*'              # a subset, matched against case ids
+pnpm eval --overlay /path/to/dir      # read local cases from another directory than evals/local
+PHI_GUARD_GUARDRAIL_ID=... PHI_GUARD_GUARDRAIL_VERSION=... PHI_GUARD_AWS_REGION=us-east-1 pnpm eval
+pnpm eval --target keyed=abc123:2 --target all=def456:1   # compare guardrails side by side
+```
+
+A target is `<name>=<guardrailId>:<version>` (split on the last colon, so an ARN works).
+Without `--target`, the guardrail comes from `PHI_GUARD_GUARDRAIL_ID` and
+`PHI_GUARD_GUARDRAIL_VERSION`; region and profile come from `PHI_GUARD_AWS_REGION` and
+`PHI_GUARD_AWS_PROFILE` (default `phi-guard`), as in the sandbox. `--concurrency <n>`
+defaults to 4. Results go to `evals/results/<timestamp>/results.json` (gitignored) and hold
+case ids, outcomes, finding types and timings, never case text or planted values. The run
+exits non-zero when nothing ran, when any case errors outside the size probes, or when a hook
+printed output the evals cannot read. Recall, leaks, gaps and false positives only appear in the
+report, because name detection is ML-based.
+
+The corpus is generated deterministically from a fixed seed, with synthetic values only
+(reserved email domains, the fictional 555-01xx phone range, published test card numbers,
+never-issued or labelled format-valid SSNs). Company formats such as member IDs and claim
+numbers belong in `evals/local/*.jsonl` (gitignored, one case per line in the same schema);
+their categories report only when such a file exists. To compare date policies, deploy
+`infra/guardrail.yaml` a second time as another stack with `DatePolicy=All`, give the work
+profile `bedrock:ApplyGuardrail` on both guardrails, and pass both as targets.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#evals) describes what is measured and which
+categories are known gaps.
 
 ## Cost
 
