@@ -81,5 +81,8 @@ export function caseProblem(candidate: unknown): string | undefined {
     const problem = plantedProblem(entry);
     if (problem !== undefined) return problem;
   }
-  return placementProblem(text, (planted as Planted[]).map(({ value }) => value));
+  return placementProblem(
+    text,
+    (planted as Planted[]).map(({ value }) => value),
+  );
 }

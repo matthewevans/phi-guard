@@ -9,6 +9,8 @@
     "typecheck": "tsc",
     "test": "node --test 'test/**/*.test.ts'",
     "build": "scripts/build.sh dist",
+    "format": "prettier --write '**/*.{ts,json}'",
+    "format:check": "prettier --check '**/*.{ts,json}'",
     "check": "scripts/check.sh",
     "e2e": "scripts/e2e.sh",
     "eval": "node evals/run.ts"
@@ -20,7 +22,10 @@
     "@faker-js/faker": "^10.6.0",
     "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
-    "typescript": "^7.0.2"
+    "prettier": "^3.9.10",
+    "smol-toml": "^1.9.1",
+    "typescript": "^7.0.2",
+    "yaml": "^2.9.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -32,14 +32,14 @@ import { defaultTarget, hookEnv, parseTarget } from '../evals/targets.ts';
 import { CATEGORIES, TAXONOMY } from '../evals/taxonomy.ts';
 import { RESERVED_EMAIL_DOMAINS, TEST_PANS } from '../evals/synthetic.ts';
 import { parseTemplate, readTemplate } from '../evals/template.ts';
+import { clean } from './fakes.ts';
 import { spawnHook } from './hook-process.ts';
 
 const corpus = buildCorpus();
 const template = readTemplate();
 const regexNames = template.regexes.map(({ name }) => name);
 
-const positives = (category: string) =>
-  corpus.filter(({ planted }) => planted.some((p) => p.category === category));
+const positives = (category: string) => corpus.filter(({ planted }) => planted.some((p) => p.category === category));
 const valuesOf = (category: string, sub: string) =>
   corpus.flatMap(({ planted }) => planted.filter((p) => p.category === category && p.sub === sub).map((p) => p.value));
 
@@ -60,10 +60,9 @@ test('a few cases match a committed snapshot, so wall-clock or generator drift f
     'Write a regression test for this failing record: admission_date 2026-01-08, discharge_date 01/22/2026.',
   );
   assert.equal(
-    text('hl7/pid-001'),
-    'MSH|^~\\&|REG|HOSP|EHR|HOSP|20261001120000||ADT^A01|MSG0001|P|2.3\n' +
-      'PID|1||10275230^^^HOSP^MR||Lubowitz^Natasha||19960105|F|||5115 Weimann Glen^^Claudeburgh^TX^44287||' +
-      '+1 617 555 0180|||||2956786799|529-29-2754',
+    text('log/ssn-never-issued-001'),
+    '2026-10-01T12:00:00.000Z ERROR record-service rejected record ssn="677-00-1613"\n' +
+      '2026-10-01T12:00:00.000Z WARN  record-service will retry in 500ms',
   );
 });
 
@@ -94,7 +93,9 @@ test('synthetic values stay inside reserved or never-issued ranges', () => {
     [...pan].reverse().reduce((sum, digit, index) => {
       const n = Number(digit) * (index % 2 === 1 ? 2 : 1);
       return sum + (n > 9 ? n - 9 : n);
-    }, 0) % 10 === 0;
+    }, 0) %
+      10 ===
+    0;
   const cards = valuesOf('account', 'card');
   assert.ok(cards.length > 0);
   for (const card of cards) {
@@ -143,9 +144,18 @@ test('size probes bracket both text-unit quotas and plant a value in the final 5
   const probes = corpus.filter(({ format }) => format === 'large');
   assert.ok(probes.length >= 5);
   const units = probes.map(({ text }) => textUnits(text));
-  assert.ok(units.some((n) => n <= 106), 'under the 106-unit quota');
-  assert.ok(units.some((n) => n > 106 && n <= 1000), 'between the two quotas');
-  assert.ok(units.some((n) => n > 1000), 'over the 1,000-unit quota');
+  assert.ok(
+    units.some((n) => n <= 106),
+    'under the 106-unit quota',
+  );
+  assert.ok(
+    units.some((n) => n > 106 && n <= 1000),
+    'between the two quotas',
+  );
+  assert.ok(
+    units.some((n) => n > 1000),
+    'over the 1,000-unit quota',
+  );
   for (const { id, text, planted } of probes) {
     assert.ok(planted.length >= 3, id);
     const last = planted.at(-1)!;
@@ -203,14 +213,38 @@ test('PersonDate masks keyed person dates by default, and DatePolicy All also ma
   for (const text of ['10.0.0.15', 'version 1.2.3', 'v20.11.1']) assert.doesNotMatch(text, all, text);
 });
 
+const guardrail = (properties: string) =>
+  `Resources:\n  Guardrail:\n    Properties:\n${properties.replaceAll(/^/gm, '      ')}\n`;
+
 test('the template reader assembles each variant of a joined pattern from its parts', () => {
-  const { regexes } = parseTemplate("BlockedOutputsMessaging: 'x'\n- Name: D\n  Pattern: !Join ['', ['a''b', !If [C, '|c', '']]]\n");
+  const { regexes } = parseTemplate(
+    guardrail(
+      [
+        "BlockedOutputsMessaging: 'x'",
+        'SensitiveInformationPolicyConfig:',
+        '  PiiEntitiesConfig: []',
+        '  RegexesConfig:',
+        '    - Name: D',
+        "      Pattern: !Join ['', ['a''b', !If [C, '|c', '']]]",
+      ].join('\n'),
+    ),
+  );
   assert.deepEqual(regexes, [{ name: 'D', refs: [], patterns: ["a'b", "a'b|c"] }]);
 });
 
 test('the template reader finds the blocked-output message, entities and parameterised regexes', () => {
   const parsed = parseTemplate(
-    "BlockedOutputsMessaging: 'it''s blocked'\n- { Type: NAME, Action: BLOCK }\n- Name: Id\n  Pattern: !Ref IdPattern\n",
+    guardrail(
+      [
+        "BlockedOutputsMessaging: 'it''s blocked'",
+        'SensitiveInformationPolicyConfig:',
+        '  PiiEntitiesConfig:',
+        '    - { Type: NAME, Action: BLOCK }',
+        '  RegexesConfig:',
+        '    - Name: Id',
+        '      Pattern: !Ref IdPattern',
+      ].join('\n'),
+    ),
   );
   assert.deepEqual(parsed, {
     blockedOutputsMessaging: "it's blocked",
@@ -225,7 +259,6 @@ const bash = { stdout: 'x', stderr: '', interrupted: false, isImage: false };
 const flagging =
   (findings: string[], masked: string): Scan =>
   async () => ({ intervened: true, text: masked, findings });
-const clean: Scan = async (text) => ({ intervened: false, text, findings: [] });
 const blockedMessage = template.blockedOutputsMessaging;
 
 test('classifies what maskBashOutput produces: masked, withheld by the guardrail and unchanged', async () => {
@@ -335,7 +368,10 @@ test('latency uses nearest-rank percentiles', () => {
 });
 
 test('text units are one per started 1,000 characters, and cost follows the PII filter rate', () => {
-  assert.deepEqual([0, 1, 1000, 1001, 2500].map((length) => textUnits('a'.repeat(length))), [0, 1, 1, 2, 3]);
+  assert.deepEqual(
+    [0, 1, 1000, 1001, 2500].map((length) => textUnits('a'.repeat(length))),
+    [0, 1, 1, 2, 3],
+  );
   assert.ok(Math.abs(estimatedCost(1000) - 0.1) < 1e-12);
 });
 
@@ -433,7 +469,11 @@ test('prompt category rows count cases, recall and type misses, including for ga
     text: 'mrn 12345678',
     planted: [plant('mrn', 'mrn', '12345678')],
   };
-  const runs = [run(positive, {}, {}), run(positive, {}, { missing: ['EMAIL'] }), run(gapOnly, {}, { outcome: 'passed' })];
+  const runs = [
+    run(positive, {}, {}),
+    run(positive, {}, { missing: ['EMAIL'] }),
+    run(gapOnly, {}, { outcome: 'passed' }),
+  ];
   assert.deepEqual(promptCategoryRows(runs), [
     ['name', 'detectable', '2', '50.0% (1/2) [9%-91%]', '1'],
     ['email', 'detectable', '2', '50.0% (1/2) [9%-91%]', '1'],
@@ -474,11 +514,14 @@ test('a bad overlay row fails with its file and row number, never its content', 
     '',
     JSON.stringify({ ...overlayRow, id: 'local/b', planted: [{ ...overlayRow.planted[0], value: secret }] }),
   ];
-  assert.throws(() => parseCases(rows.join('\n'), 'members.jsonl'), (error: Error) => {
-    assert.match(error.message, /^members\.jsonl row 3: planted value 0 occurs 0 times/);
-    assert.doesNotMatch(error.message, new RegExp(secret));
-    return true;
-  });
+  assert.throws(
+    () => parseCases(rows.join('\n'), 'members.jsonl'),
+    (error: Error) => {
+      assert.match(error.message, /^members\.jsonl row 3: planted value 0 occurs 0 times/);
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      return true;
+    },
+  );
   assert.throws(() => parseCases('{nope', 'a.jsonl'), /^Error: a\.jsonl row 1: not valid JSON$/);
   const unknownCategory = JSON.stringify({ ...overlayRow, planted: [{ ...overlayRow.planted[0], category: 'nope' }] });
   assert.throws(() => parseCases(unknownCategory, 'a.jsonl'), /row 1: unknown category/);
@@ -524,7 +567,10 @@ test('pnpm eval --list prints ids, formats and categories without scanning or sh
   });
   rmSync(emptyOverlay, { recursive: true });
   assert.equal(result.status, 0, result.stderr);
-  const rows = result.stdout.trim().split('\n').map((line) => line.split('\t'));
+  const rows = result.stdout
+    .trim()
+    .split('\n')
+    .map((line) => line.split('\t'));
   assert.equal(rows.length, corpus.filter(({ format }) => format === 'csv').length);
   for (const [id, format] of rows) assert.ok(id.startsWith('csv/') && format === 'csv');
 });

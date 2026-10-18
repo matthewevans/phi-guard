@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Sourced from /etc/zsh/zshrc and /etc/bash.bashrc (see the Dockerfile), so it works in
 # both shells. Hook commands run in non-interactive shells and must print nothing, which
 # would corrupt their JSON, so only interactive shells get the banner and the prompt.

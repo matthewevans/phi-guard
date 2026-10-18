@@ -2,14 +2,16 @@
 // the model before PostToolUse runs, so it must never carry anything the command printed.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const runner = new URL('../dist/codex-runner.mjs', import.meta.url).pathname;
 const scratch = mkdtempSync(join(tmpdir(), 'phi-guard-runner-'));
+after(() => rmSync(scratch, { recursive: true, force: true }));
 const MARKER = '[phi-guard: output captured for scanning]\n';
 
 let counter = 0;
@@ -60,7 +62,7 @@ test('forwards SIGTERM to the command and reports 143', async () => {
   let stdout = '';
   child.stdout.on('data', (chunk) => (stdout += chunk));
   while (!existsSync(capture) || !readFileSync(capture, 'utf8').includes('started')) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await sleep(20);
   }
   child.kill('SIGTERM');
   const [code] = await once(child, 'exit');

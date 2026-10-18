@@ -1,12 +1,13 @@
 // Reads what the evals need from infra/guardrail.yaml. The template uses CloudFormation
-// tags (!Ref, !Join, !If), so this is a line-level reader that knows only the shapes the file uses.
+// short-form tags, which the YAML parser resolves into their long-form JSON shapes.
 import { readFileSync } from 'node:fs';
+import { parse, type CollectionTag, type ScalarTag } from 'yaml';
 
 export interface TemplateRegex {
   name: string;
   /** Parameters the pattern comes from (`!Ref`). Empty for a fixed pattern. */
   refs: string[];
-  /** Assembled patterns, unescaped from YAML single quotes: one per variant of a conditional pattern. */
+  /** Assembled patterns: one per variant of a conditional pattern. */
   patterns: string[];
 }
 
@@ -16,25 +17,67 @@ export interface Template {
   regexes: TemplateRegex[];
 }
 
-const unquote = (scalar: string) => scalar.replaceAll("''", "'");
+// The long form of `!Ref` is `Ref`, and of every other tag `Fn::<name>`.
+const longForm = (name: string) => (name === 'Ref' ? name : `Fn::${name}`);
 
-// A `!Join` pattern is a base followed by parts that `!If` adds, so each variant is one
-// more part appended to the one before.
-function assembled(pattern: string): string[] {
-  const parts = [...pattern.matchAll(/'((?:[^']|'')*)'/g)].map((match) => unquote(match[1])).filter(Boolean);
-  return pattern.includes('!Join') ? parts.map((_, end) => parts.slice(0, end + 1).join('')) : parts;
+const scalarTag = (name: string): ScalarTag => ({
+  tag: `!${name}`,
+  resolve: (value) => ({ [longForm(name)]: value }),
+});
+
+const sequenceTag = (name: string): CollectionTag => ({
+  tag: `!${name}`,
+  collection: 'seq',
+  resolve: (seq) => ({ [longForm(name)]: seq.toJSON() }),
+});
+
+const customTags = [...['Ref', 'GetAtt', 'Sub'].map(scalarTag), ...['Join', 'If', 'Equals'].map(sequenceTag)];
+
+type Conditional = { 'Fn::If': [condition: string, whenTrue: string, whenFalse: string] };
+type Pattern = string | { Ref: string } | { 'Fn::Join': [separator: string, parts: (string | Conditional)[]] };
+
+interface Document {
+  Resources: {
+    Guardrail: {
+      Properties: {
+        BlockedOutputsMessaging: string;
+        SensitiveInformationPolicyConfig: {
+          PiiEntitiesConfig: { Type: string }[];
+          RegexesConfig: { Name: string; Pattern: Pattern }[];
+        };
+      };
+    };
+  };
 }
 
-export function parseTemplate(yaml: string): Template {
-  const blocked = /BlockedOutputsMessaging: '((?:[^']|'')*)'/.exec(yaml);
-  if (!blocked) throw new Error('template has no BlockedOutputsMessaging');
+// A `!Join` pattern is a base followed by parts that `!If` adds, so there is one variant
+// for each branch of every `!If`.
+function variants(pattern: Pattern): string[] {
+  if (typeof pattern === 'string') return [pattern];
+  if ('Ref' in pattern) return [];
+  const [, parts] = pattern['Fn::Join'];
+  return parts.reduce(
+    (assembled, part) =>
+      typeof part === 'string'
+        ? assembled.map((variant) => variant + part)
+        : [
+            ...assembled.map((variant) => variant + part['Fn::If'][2]),
+            ...assembled.map((variant) => variant + part['Fn::If'][1]),
+          ],
+    [''],
+  );
+}
+
+export function parseTemplate(text: string): Template {
+  const { Properties } = (parse(text, { customTags }) as Document).Resources.Guardrail;
+  const { PiiEntitiesConfig, RegexesConfig } = Properties.SensitiveInformationPolicyConfig;
   return {
-    blockedOutputsMessaging: unquote(blocked[1]),
-    entityTypes: [...yaml.matchAll(/\{ Type: (\w+),/g)].map((match) => match[1]),
-    regexes: [...yaml.matchAll(/- Name: (\w+)\n\s+Pattern: (.+)/g)].map(([, name, pattern]) => ({
-      name,
-      refs: [...pattern.matchAll(/!Ref (\w+)/g)].map((match) => match[1]),
-      patterns: assembled(pattern),
+    blockedOutputsMessaging: Properties.BlockedOutputsMessaging,
+    entityTypes: PiiEntitiesConfig.map(({ Type }) => Type),
+    regexes: RegexesConfig.map(({ Name, Pattern }) => ({
+      name: Name,
+      refs: typeof Pattern === 'object' && 'Ref' in Pattern ? [Pattern.Ref] : [],
+      patterns: variants(Pattern),
     })),
   };
 }

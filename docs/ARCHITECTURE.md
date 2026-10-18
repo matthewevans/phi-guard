@@ -6,8 +6,8 @@ OpenAI Codex CLI. The sandbox does most of the work. The hooks catch the human
 mistakes the sandbox can't, such as pasting a log line.
 
 The hooks run as the same user as the agent, so they are a safety net against
-accidents. An agent, a repo config, or any other process running as that user can
-defeat them. Failure behavior below says where.
+accidents. [Same-uid tampering](#same-uid-tampering) says what that user can defeat,
+and Failure behavior below says where each failure fails open.
 
 ## Components and trust boundaries
 
@@ -24,7 +24,7 @@ flowchart LR
     rn[["Codex runner<br/>buffer only, offline"]]
     post[["Codex PostToolUse hook<br/>scans the capture"]]
     cap[("Capture file<br/>/tmp/phi-guard-uid")]
-    repo[("Shallow clone<br/>no PHI committed")]
+    repo[("Working tree<br/>no PHI committed,<br/>fresh or shallow clone safest")]
   end
 
   subgraph baa["Company AWS account (BAA)"]
@@ -170,7 +170,7 @@ PostToolUse scans `tool_response` directly.
 | Public SaaS (Jira cloud, Datadog) | Container egress firewall, and the container holds no credentials for them | Reachable in web mode, covered in strict mode | Reachable in web mode, covered in strict mode |
 | Host secrets and config other than the mounted `~/.aws` and `~/.npmrc` (`~/.ssh`, MCP config) | Container boundary | Covered | Covered |
 | PHI data stores reached with the mounted AWS credentials | In strict mode the egress firewall, then the credentials' own permissions | Reachable in web mode with the mounted credentials, so the credentials' permissions govern access. Covered in strict mode, for IPv4, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` | Same as Claude Code |
-| Committed fixtures and history | Policy: no PHI committed; shallow clone | Covered by policy | Covered by policy |
+| Committed fixtures and history | Policy: no PHI committed; a fresh or shallow clone is safest | Covered by policy | Covered by policy |
 | Text the developer types or pastes | Prompt hook (block) | Covered, limited by detection | Covered, limited by detection |
 | Command output (tests, scripts) | Output hook (mask) | Covered for the `Bash` tool, limited by detection | Covered for the `Bash` tool through the wrapper, limited by detection |
 | Files read with the Read tool, `@file` mentions | Not yet | **Gap** (stretch goal) | A file read through a shell command is command output and is scanned. No claim is made for other read paths |
@@ -189,15 +189,30 @@ WebSearch and Codex web search are believed to run on the provider's servers, so
 container's firewall does not carry that traffic (not verified). WebFetch and `curl`
 run in the container and work in web mode.
 
-`PHI_GUARD_FIREWALL` selects the firewall mode: `web` (the default), `strict` or
-`off`. In `web` mode the container reaches any public IPv4 address and rejects the
-private and internal ranges. The design treats public web traffic as PHI-free, and
-treats accidental PHI access through AWS as very hard in the intended setup. `strict`
-allows only the allowlist (see Devcontainer notes). `off` skips the firewall, and then
-the live-systems rows are the user's responsibility. Any other value makes the script
-exit before it changes a rule. The hooks never read that variable. The value is fixed
-when the container is created. The firewall also writes no IPv6 rules (see the IPv4
-only row in the Container table).
+## Firewall modes
+
+`PHI_GUARD_FIREWALL` selects the mode. The README's [Install](../README.md#install)
+section says how to set it.
+
+| Value | Egress |
+|---|---|
+| `web` (default) | Any public IPv4 address. After the DNS, SSH, loopback and host-network accepts, the firewall rejects `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and `169.254.0.0/16` (the last holds the cloud metadata service), then accepts all other outbound traffic. Web searches, WebFetch and `curl` to public sites work. It makes no DNS lookups for an allowlist and reads no region, so it needs no guardrail configuration. Its self-test expects `https://api.github.com/zen` to answer and `http://169.254.169.254/` to fail |
+| `strict` | An allowlist: GitHub's published ranges, `registry.npmjs.org`, the Anthropic hosts (`api.anthropic.com`, `claude.ai`, `claude.com`, `platform.claude.com`), the OpenAI hosts Codex needs (`api.openai.com`, `chatgpt.com`, `auth.openai.com`), `bedrock-runtime.<region>.amazonaws.com`, `sts.<region>.amazonaws.com` and the VS Code hosts from the reference. Hosts derived from the mounted credential files and every `PHI_GUARD_EXTRA_HOSTS` entry are added (see the Container table). The Sentry and Statsig telemetry hosts from the reference are dropped. Codex hosts seen rarely in its source (`ab.chatgpt.com`, `files.openai.com`) are not allowed, and Part 2 checks whether Codex login needs them. A listed host is reachable with all of the mounted credentials |
+| `off` | No firewall. The live-systems rows above become the user's responsibility |
+
+The design treats public web traffic as PHI-free, and treats accidental PHI access
+through AWS as very hard in the intended setup. The hooks never read
+`PHI_GUARD_FIREWALL`. `devcontainer.json` passes it from the host environment into
+the container, default `web`, and the value is fixed when the container is created.
+The exact value `off` makes `postStartCommand` skip the firewall script. Any other
+value goes to the script as its first argument (`PHI_GUARD_EXTRA_HOSTS` is the
+second). The script accepts only `web` and `strict` and exits before it changes a
+rule on anything else. The firewall writes no IPv6 rules (see the IPv4 only row in
+the Container table).
+
+Strict mode resolves DNS once, when the script starts. To refresh the allowlist after
+an IP rotation, restart the container: `postStartCommand` re-runs the script in a
+fresh network namespace, and re-running it in place is not supported.
 
 ## Failure behavior
 
@@ -207,15 +222,17 @@ Claude Code:
 |---|---|---|
 | Guardrail flags PHI | Blocks the prompt | Masks the values |
 | AWS error, throttling, bad credentials | Blocks (own catch) | Withholds output (own catch) |
-| Scan slower than 10s | Blocks (AbortSignal) | Withholds (AbortSignal) |
+| The Bedrock call takes longer than 10s (an AbortSignal on the HTTP request) | Blocks | Withholds |
+| Own 15s deadline (credential resolution or stdin hangs; the AbortSignal covers only the HTTP request) | Blocks | Withholds |
+| `tool_response` lacks `stdout` and `stderr` strings (the Bash result shape changed) | n/a | Withholds (`InvalidHookInput`) if Claude Code accepts the replacement shape (next row) |
 | The guardrail scanned fewer characters than were sent (text over its size quota) | Blocks (`PartialGuardrailCoverage`) | Withholds (`PartialGuardrailCoverage`) |
 | The response omits `guardrailCoverage`, so a partial scan cannot be seen (unverified whether the API ever omits it) | **Fails open** for that prompt | **Fails open** for that output |
-| Hook crashes or exceeds 20s | Blocks (`onFailure: "block"`) | **Fails open**: `onFailure` can't withhold PostToolUse output |
+| Hook crashes, or is killed at the 20s hook timeout (the 15s deadline makes a kill unlikely) | Blocks (`onFailure: "block"`) | **Fails open**: `onFailure` can't withhold PostToolUse output |
 | Replacement output has the wrong shape | n/a | **Fails open**: Claude Code ignores it. The hook spreads the original fields, and `scripts/e2e.sh` checks this |
-| Same-uid tampering: anything that runs as the agent's uid, or a project or user settings `env`, alters the hook's inputs. Demonstrated: project `.claude/settings.json` `env.LD_PRELOAD` (needs only a committed repo file), and `PATH` and `NODE_OPTIONS` before they were pinned. Likely, not run: `env` `AWS_CONFIG_FILE` or credential variables pointing at another account's guardrail. Also user-level agent config and a killed hook process | **Can fail open** for every later prompt in the session. A substituted `node` that exits 0 with no output is not a failure | **Can fail open** for every later command in the session |
+| Same-uid tampering (see [Same-uid tampering](#same-uid-tampering)) | **Can fail open** for every later prompt in the session. A substituted `node` that exits 0 with no output is not a failure | **Can fail open** for every later command in the session |
 
-The two fail-open rows are why the output hook is bundled with no runtime
-dependencies, and why its own timeout sits well under the hook timeout. The
+The crash-or-kill row is why the output hook is bundled with no runtime
+dependencies, and why its own 15s deadline sits under the 20s hook timeout. The
 Claude hooks use the exec form (`command: "node"` plus `args`), so no shell
 reads startup files for them. That is inferred from the hook form and has not
 been verified.
@@ -229,10 +246,10 @@ its own 15s deadline under the 20s hook timeout.
 |---|---|---|---|
 | Guardrail flags PHI | Blocks the prompt | n/a | Replaces the result with the masked text |
 | AWS error, throttling, bad credentials, missing config | Blocks (own catch) | n/a, it reads no config | Withholds (own catch) |
-| Scan slower than 10s | Blocks (AbortSignal) | n/a | Withholds (AbortSignal) |
-| The guardrail scanned fewer characters than were sent | Blocks (`PartialGuardrailCoverage`) | n/a | Withholds (`PartialGuardrailCoverage`). A scan is at most about 20 KB here, far under the quota |
+| The Bedrock call takes longer than 10s (an AbortSignal on the HTTP request) | Blocks | n/a | Withholds |
+| The guardrail scanned fewer characters than were sent | Blocks (`PartialGuardrailCoverage`) | n/a | Withholds (`PartialGuardrailCoverage`) |
 | The response omits `guardrailCoverage` (unverified) | **Fails open** for that prompt | n/a | **Fails open** for that output |
-| Own 15s deadline | Blocks | Exit 2: the command is blocked and never runs | Withholds |
+| Own 15s deadline (credential resolution or stdin hangs) | Blocks | Exit 2: the command is blocked and never runs | Withholds |
 | Entrypoint exits non-zero (crash, `node` missing) | Exit 2 guard blocks | Exit 2 guard blocks the command | Exit 2 guard blocks |
 | Capture file missing, unreadable, or unsafe (symlink, other owner, extra hard links, not a regular file) | n/a | n/a | Withholds, naming the cause |
 | Runner cannot create the capture | n/a | n/a | The runner prints a withheld notice naming the cause and exits non-zero |
@@ -255,7 +272,7 @@ close.
 | Shell or profile output corrupting hook JSON | Codex runs a hook command through a shell with `-c`. Observed in the container, it is the passwd shell of user `node` (bash, with `SHELL` set to zsh and to sh), which reads no startup files. Anything that shell prints before the hook runs corrupts the hook's JSON and makes the hook fail open. Applies to all three events, every turn |
 | Shell startup files and `PATH` | A Codex hook command is a shell string, so a shell startup file or a `PATH` change can subvert it. Where the passwd shell is zsh, a non-login `zsh -c` reads `~/.zshenv`, and a login invocation (`zsh -lc`) also reads `~/.zprofile` and `~/.zlogin`. A file that prints, runs `exit 0`, shadows `node` or changes `PATH` turns the hook into a no-op, because the guard catches only non-zero exits. Under `danger-full-access` the agent can write those files. Applies to all three events, every later turn and session. In the container the passwd shell is bash, which reads none of them, so this path is open for a host install whose passwd shell is zsh. A `PATH` prepend in `~/.profile` still affects Codex sessions launched from a bash login terminal (demonstrated). `ZDOTDIR=/etc/zsh` would redirect a zsh passwd shell to root-owned files, but it does not protect the Codex hooks while the passwd shell is bash |
 | A competing PreToolUse hook that rewrites commands | The last rewrite wins, so a command can reach Codex unwrapped. A short command is then scanned by PostToolUse. A long-running one sends interim chunks to the model with no hook. In the container, `allow_managed_hooks_only` skips plugin and user hooks (from the Codex source, not observed) |
-| Same-uid tampering | Anything that runs as the agent's uid can make the hooks fail open, and so can environment it controls. Killing a hook's `node` process trips the exit-2 guard and fails closed. Killing the hook's shell fails open for that one prompt or command. `[features] hooks = false` in a user `config.toml` turns off all three hooks for every later session (the container pins `hooks = true` in `requirements.toml`). A `PATH` prepend or a startup file changes which `node` runs, as described in the previous rows. Likely, not run: `AWS_CONFIG_FILE` or credential variables pointing at another account's guardrail |
+| Same-uid tampering | Can make all three hooks fail open. See [Same-uid tampering](#same-uid-tampering) for the Codex-specific paths |
 | Interrupted commands | Codex SIGKILLs the runner's process group. The command's own process runs detached in its own session, which keeps it from writing to `/dev/tty`, so it survives and keeps writing to its capture file. Its output still never reaches the model |
 | Abandoned capture files | A capture that PostToolUse never reads (an interrupted command, a command whose detached child is still writing, a killed PostToolUse hook) stays in `/tmp/phi-guard-<uid>` holding raw, unscanned output until someone removes it. The directory is mode 0700 |
 | Approval prompts and approval rules | They see `'<node>' '<runner>' '<capture path>' <base64>`, not the original command |
@@ -264,8 +281,8 @@ close.
 | Interactive and tty commands | Output arrives only at exit |
 | Interleaving and shell | The runner captures stdout and stderr into one interleaved file, and runs the command as a non-login `$SHELL -c` (Codex's login flag is lost) |
 | Read-only sandbox, or `exclude_slash_tmp` | The runner cannot write its capture, so every command's output is withheld. This fails closed. phi-guard needs a Codex sandbox that allows writes to `/tmp`: workspace-write or danger-full-access |
-| User `!` commands | Run with no hooks, and their output enters the context |
-| MCP and other non-Bash tools | Hook under their own names (`mcp__<server>__<tool>`) and are not matched. The container configures an MCP allowlist of none |
+| User `!` commands | Run with no hooks, and their output enters the context (see the coverage table) |
+| MCP and other non-Bash tools | Not matched (see the coverage table). The container configures an MCP allowlist of none |
 
 Container:
 
@@ -278,34 +295,46 @@ Container:
 | Reference firewall rules that stay | Outbound DNS (UDP 53) to any resolver, outbound SSH (TCP 22) to any host, and the host's /24 network are allowed, as in Anthropic's reference. In web mode these accepts come before the private-range rejects, so DNS and SSH also reach private addresses, and the host's /24 stays reachable although it usually sits inside a rejected range |
 | VPN-gated services at public addresses (web mode) | A service that admits the VPN's source IP at a public address, or an internal name that resolves to a public address, is reachable when the host routes container traffic through its VPN. Its own authentication is then the only gate. Strict mode blocks it |
 | Web mode allows any public host | A tool or agent can send data to any public site. That matters only if PHI reached the context, which is what the hooks prevent. Public SaaS is reachable, and the container holds no credentials for it |
-| The agent can switch firewall modes | `node` may run `sudo /usr/local/bin/init-firewall.sh` with any argument, so the agent can re-run it as `strict` or `web`. This takes deliberate action and belongs to the same-uid class below |
-| `PHI_GUARD_FIREWALL=off` | No egress boundary at all. Only the exact value `off` skips the firewall, and the value is fixed when the container is created. Any value other than `web`, `strict` and `off` makes the script exit before it changes a rule, which leaves the container without a firewall and `postStartCommand` failing |
+| The agent can switch firewall modes | `node` may run `sudo /usr/local/bin/init-firewall.sh` with any argument, so the agent can re-run it as `strict` or `web`. This takes deliberate action and belongs to the same-uid class (see [Same-uid tampering](#same-uid-tampering)) |
+| `PHI_GUARD_FIREWALL=off` | No egress boundary at all. A value other than `web`, `strict` and `off` makes the script exit before it changes a rule, which leaves the container without a firewall and `postStartCommand` failing (see Firewall modes) |
 | `/home/node` is writable by the agent | This covers agent state and any shell startup files. `~/.aws` and `~/.npmrc` are read-only mounts (see the next rows). Endpoint redirection through a profile's `endpoint_url` or `AWS_ENDPOINT_URL*` is neutralised by endpoint pinning |
-| The agent can read the engineer's AWS and npm credentials | `devcontainer.json` mounts the host `~/.aws` (every profile, SSO token cache and any static keys in it) and `~/.npmrc` (registry tokens). Everything the engineer's credentials can do is available to the agent, not only `bedrock:ApplyGuardrail`. In web mode any public AWS endpoint, including PHI data stores, is reachable with those credentials, and their permissions are the only limit. In strict mode egress reaches the allowlist (GitHub, npm, the model providers, Bedrock, STS, SSO, the allowlisted CodeArtifact hosts, the VS Code hosts and every `PHI_GUARD_EXTRA_HOSTS` entry), plus the reference DNS, SSH and host-network rules. With `PHI_GUARD_FIREWALL=off` the credentials reach any AWS service, including PHI data stores. A token the agent reads, for example while debugging npm auth, lands in the model provider's transcript |
+| The agent can read the engineer's AWS and npm credentials | `devcontainer.json` mounts the host `~/.aws` (every profile, SSO token cache and any static keys in it) and `~/.npmrc` (registry tokens). Everything the engineer's credentials can do is available to the agent, not only `bedrock:ApplyGuardrail`. In web mode any public AWS endpoint, including PHI data stores, is reachable with those credentials, and their permissions are the only limit. In strict mode egress reaches the allowlist (see Firewall modes) plus the reference DNS, SSH and host-network rules. With `PHI_GUARD_FIREWALL=off` the credentials reach any AWS service, including PHI data stores. A token the agent reads, for example while debugging npm auth, lands in the model provider's transcript |
 | Read-only credential mounts | Both mounts are `readonly`, so the agent cannot edit the host's `~/.aws/config` or `~/.npmrc`, for example to plant a `credential_process` that a host tool later runs. The bundled AWS SDK ignores SSO token-cache write errors (from its source, not run against a real SSO session), so a token refresh inside the container works without persisting |
-| Derived firewall hosts are read at start (strict mode) | The strict firewall reads `portal.sso.<region>` and `oidc.<region>` for each `sso_region` in `~/.aws/config`, the host of each CodeArtifact `registry=` URL in `~/.npmrc`, and the hostnames in `PHI_GUARD_EXTRA_HOSTS`. Entries that are not valid are skipped with a warning, and a host that does not resolve is skipped with a warning. After changing `~/.aws/config` or `~/.npmrc`, restart the container. `PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created |
+| Derived firewall hosts are read at start (strict mode) | The strict firewall reads `portal.sso.<region>` and `oidc.<region>` for each `sso_region` in `~/.aws/config`, the host of each CodeArtifact `registry=` URL in `~/.npmrc`, and the hostnames in `PHI_GUARD_EXTRA_HOSTS`. Entries that are not valid are skipped with a warning, and a host that does not resolve is skipped with a warning. All of this is read once, when the script starts, so changes to `~/.aws/config` or `~/.npmrc` need a container restart. `PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created |
 | Expired AWS session | The scan fails with bad credentials, so prompts are blocked and output is withheld (fail closed) until the engineer refreshes the session on the host |
 | Repo-shipped enforcement | `.devcontainer/` (managed settings, `requirements.toml`, `init-firewall.sh`, `devcontainer.json`) and `dist/` live in `/workspace`, which the agent and anyone with repo write access can edit. Edits take effect at the next container start or rebuild and can remove the hooks, the managed settings or the firewall, including by changing `PHI_GUARD_FIREWALL`, and an edited `initializeCommand` runs on the host. Review `.devcontainer/` and `dist/` changes before rebuilding. Policy that engineers must not bypass belongs in server-managed settings or MDM |
-| Same-uid tampering | Anything that runs as uid `node`, and any repo or user settings `env`, can make the hooks fail open (both agents). See the same-uid rows in the Claude failure table and the Codex residuals table above |
+| Same-uid tampering | Anything that runs as uid `node`, and any repo or user settings `env`, can make the hooks fail open (both agents). See [Same-uid tampering](#same-uid-tampering) |
 | Reference devcontainer license | The Dockerfile, `devcontainer.json` and `init-firewall.sh` are adapted from Anthropic's reference (© Anthropic PBC, subject to Anthropic's Commercial Terms of Service). Attribution is kept in each file header and in `.devcontainer/LICENSE-anthropic-reference.md` |
 
-In the devcontainer, managed Claude `env` pins `PATH` and `NODE_OPTIONS`. That
-closes those two variables only, and the environment is not locked down: other
-variables, such as `LD_PRELOAD` in a project's `.claude/settings.json` `env`, still
-reach the hooks. `ZDOTDIR=/etc/zsh` keeps interactive zsh from reading node-owned
-dotfiles and plays no part in running the Codex hooks. The hooks share the agent's
-uid, so they stay a safety net against mistakes, and an agent, a repo config or
-any process running as that uid can still make them fail open. A separate uid for
-the hooks would be the real fix and is out of scope.
+## Same-uid tampering
+
+The hooks share the agent's uid, so they stay a safety net against mistakes. Anything
+that runs as that uid (the agent, a command it runs, a committed repo file the agent
+loads) and any project or user settings `env` can alter the hooks' inputs and make
+them fail open, for every later prompt and command in the session. A separate uid for
+the hooks would be the real fix and is out of scope. The failure tables and the
+Container table link here for this class.
+
+- **Claude Code.** Demonstrated: project `.claude/settings.json` `env.LD_PRELOAD`,
+  which needs only a committed repo file, and `PATH` and `NODE_OPTIONS` before they
+  were pinned. Likely, not run: `env` `AWS_CONFIG_FILE` or credential variables
+  pointing at another account's guardrail, user-level agent config, and a killed hook
+  process. A substituted `node` that exits 0 with no output is not a failure.
+- **Codex.** Killing a hook's `node` process trips the exit-2 guard and fails closed.
+  Killing the hook's shell fails open for that one prompt or command.
+  `[features] hooks = false` in a user `config.toml` turns off all three hooks for
+  every later session (the container pins `hooks = true` in `requirements.toml`). A
+  `PATH` prepend or a startup file changes which `node` runs (see the shell startup
+  files row of the Codex residuals). Likely, not run: `AWS_CONFIG_FILE` or credential
+  variables pointing at another account's guardrail.
+- **Container.** Managed Claude `env` pins `PATH` and `NODE_OPTIONS` and closes those
+  two variables only. The environment is not locked down: other variables, such as
+  `LD_PRELOAD` in a project's `.claude/settings.json` `env`, still reach the hooks.
 
 ## Configuration and enforcement
 
-| Setting | Claude Code (`userConfig` key) | Codex (environment variable) |
-|---|---|---|
-| Guardrail ID | `guardrail_id` | `PHI_GUARD_GUARDRAIL_ID` |
-| Guardrail version | `guardrail_version` | `PHI_GUARD_GUARDRAIL_VERSION` |
-| AWS region | `aws_region` | `PHI_GUARD_AWS_REGION` |
-| AWS profile (optional) | `aws_profile` | `PHI_GUARD_AWS_PROFILE` |
+The settings, their Claude Code `userConfig` keys and their Codex environment
+variables are listed in the README's [Configuration](../README.md#configuration) table.
 
 One reader serves both agents. The Claude entrypoints read only
 `CLAUDE_PLUGIN_OPTION_*` and the Codex entrypoints read only `PHI_GUARD_*`. A missing
@@ -350,13 +379,11 @@ invalid one.
   UserPromptSubmit hook, and the `pluginConfigs` options reached it: the block reason
   carried an `errorName` other than `MissingGuardrailConfig`.
 - Codex analog. Inline managed `[hooks]` in `requirements.toml` fire under
-  `allow_managed_hooks_only`. That plugin hooks are skipped there comes from the
-  Codex source and was not observed.
+  `allow_managed_hooks_only`.
 - `disableBypassPermissionsMode: "disable"` downgrades
   `--dangerously-skip-permissions` to `auto` mode, and the flag is accepted.
 - Codex `--yolo` and `-c approval_policy=...` fall back to `on-request` with a
-  warning that names `/etc/codex/managed_config.toml` as the constraint. The
-  sandbox stays `danger-full-access`, and `-s read-only` remains selectable.
+  warning that names `/etc/codex/managed_config.toml` as the constraint.
 
 ## Devcontainer notes
 
@@ -368,10 +395,8 @@ invalid one.
 - **Login volumes.** `devcontainer.json` mounts the fixed-name volumes
   `phi-guard-claude-config` and `phi-guard-codex-config` at `/home/node/.claude` and
   `/home/node/.codex`. One sandbox login per machine is shared by every repo's
-  container and stays separate from the host's `~/.claude` and `~/.codex`. To sign out
-  of the sandbox, remove the containers using them and run
-  `docker volume rm phi-guard-claude-config phi-guard-codex-config`. phi-guard does not
-  choose the login method.
+  container and stays separate from the host's `~/.claude` and `~/.codex`. phi-guard
+  does not choose the login method.
 - **Sandbox markers.** These markers show that a terminal is inside the sandbox.
   `runArgs` fixes the container hostname to `phi-guard-sandbox`, and the Codex status
   line in `codex/managed_config.toml` (`[tui]`) leads with the `hostname` item. The
@@ -381,8 +406,7 @@ invalid one.
   `PHI_GUARD_FIREWALL` (`web` when unset). `/opt/phi-guard/sandbox-banner.sh` is
   appended as a source line to `/etc/zsh/zshrc` and `/etc/bash.bashrc`. In interactive
   shells it prints a three-line banner that opens with `NO PHI IN THIS SANDBOX.` and
-  prefixes the prompt with `[NO PHI] `. The sandbox allows no PHI, and the hooks scan
-  as a safety net. Bash
+  prefixes the prompt with `[NO PHI] `. Bash
   adds the prefix through `PROMPT_COMMAND` because `~/.bashrc` sets `PS1` after the
   system file. The banner returns early unless `$-` contains `i`, so the non-interactive
   `bash -c` and `zsh -c` shells that run hook commands print nothing. Whether
@@ -399,32 +423,8 @@ invalid one.
 - **Host credentials.** `initializeCommand` creates `~/.aws` and an empty `~/.npmrc`
   on the host when they are missing, because Docker refuses to start a container whose
   bind source does not exist. `devcontainer.json` then mounts both read-only. The
-  `phi-guard` profile named by `aws_profile` lives in the engineer's own
-  `~/.aws/config` (an SSO profile whose role allows `bedrock:ApplyGuardrail`). The
-  engineer refreshes sessions on the host.
-- **Web mode.** The default. After the DNS, SSH, loopback and host-network accepts, it
-  rejects `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and
-  `169.254.0.0/16` (the last holds the cloud metadata service), then accepts all other
-  outbound traffic. It makes no DNS lookups for an allowlist and reads no region, so
-  it needs no guardrail configuration. Its self-test expects `https://api.github.com/zen` to answer
-  and `http://169.254.169.254/` to fail.
-- **Strict firewall allowlist.** GitHub's published ranges, `registry.npmjs.org`, the
-  Anthropic hosts (`api.anthropic.com`, `claude.ai`, `claude.com`,
-  `platform.claude.com`), the OpenAI hosts Codex needs (`api.openai.com`,
-  `chatgpt.com`, `auth.openai.com`), `bedrock-runtime.<region>.amazonaws.com`,
-  `sts.<region>.amazonaws.com`, and the VS Code hosts from the reference. Optional
-  hosts are added from the mounted credential files and `PHI_GUARD_EXTRA_HOSTS` (see
-  the Container table). The Sentry and Statsig telemetry hosts from the reference are
-  dropped. Codex hosts seen rarely in its source (`ab.chatgpt.com`,
-  `files.openai.com`) are not allowed. Part 2 checks whether Codex login needs them.
-- **Firewall mode.** `devcontainer.json` passes `PHI_GUARD_FIREWALL` from the host
-  environment into the container, default `web`. The exact value `off` makes
-  `postStartCommand` skip the firewall script. Any other value goes to the script as
-  its first argument (`PHI_GUARD_EXTRA_HOSTS` is the second), and the script accepts
-  only `web` and `strict`. The value is fixed when the container is created.
-- **Refreshing after IP rotation (strict mode).** Restart the container.
-  `postStartCommand` re-runs the script in a fresh network namespace. Re-running it
-  in place is not supported.
+  profile named by `aws_profile` lives in the engineer's own `~/.aws/config`, and the
+  engineer refreshes sessions on the host (see the README's Install section).
 - **Guardrail values.** The public repo commits none. `devcontainer.json` passes
   `PHI_GUARD_GUARDRAIL_ID`, `PHI_GUARD_GUARDRAIL_VERSION`, `PHI_GUARD_AWS_REGION` and
   `PHI_GUARD_AWS_PROFILE` (default `phi-guard`) from the host environment as build
@@ -432,8 +432,7 @@ invalid one.
   three is empty (it names the variables, never the values), a second `RUN` writes the
   Claude `pluginConfigs` options into the root-owned managed settings with `jq`, and
   `ENV` lines give Codex the same values. Every way of building the image passes through
-  that check, so no image ships with empty options. A container keeps the image it was
-  created from, so changed values need `nophi --rebuild`. `test/devcontainer.test.ts`
+  that check, so no image ships with empty options. `test/devcontainer.test.ts`
   checks that the option keys, build args and `ENV` lines use the same names.
 - **Shell.** `SHELL=/bin/zsh` and `ZDOTDIR=/etc/zsh` serve interactive terminals.
   Because zsh looks for its startup files in root-owned `/etc/zsh`, users'
@@ -507,12 +506,15 @@ Residuals:
 bundles against real guardrails. It spawns `dist/bash-output.mjs` for every case and
 `dist/prompt.mjs` for prompt-shaped cases (prose and tickets), with the command, args and
 timeout from `hooks/hooks.json` and the stdin JSON and `CLAUDE_PLUGIN_OPTION_*` environment
-Claude Code provides. Codex shares the scanner core, so detection quality is the same;
-the Codex contract stays covered by `pnpm e2e`. It assumes Claude Code passes a command's
+Claude Code provides. The README's [Evals](../README.md#evals) section covers usage.
+Codex shares the scanner core, so detection quality is the same; the Codex contract
+stays covered by `pnpm e2e`. It assumes Claude Code passes a command's
 full stdout to the PostToolUse hook, which is unverified.
 
-- **Corpus.** About 540 positives and 110 negatives, generated from a fixed seed, plus five
-  size probes. A positive plants atomic values (first name, last name, street, city, ZIP,
+- **Corpus.** Generated deterministically from a fixed seed (`pnpm eval --list` prints every
+  case), with synthetic values only: reserved email domains, the fictional 555-01xx phone
+  range, published test card numbers, and never-issued or labelled format-valid SSNs. It
+  holds positives, negatives and five size probes. A positive plants atomic values (first name, last name, street, city, ZIP,
   each date, each number) in record-shaped dev data: prose prompts, log lines, JSON,
   CSV, psql tables, HL7 v2 PID, FHIR Patient, stack traces and tickets. A negative is
   dev output that only looks like an identifier: git authors, timestamps, changelog dates,

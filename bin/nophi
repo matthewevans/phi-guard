@@ -48,11 +48,11 @@ root=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this inside a git 
 dc=(--workspace-folder "$root" --config "$config")
 
 # The devcontainer CLI labels its containers with the resolved workspace and config
-# paths. Prints how many it removed.
+# paths. Prints how many it removed, or returns non-zero when docker cannot remove them.
 remove_containers() {
   # shellcheck disable=SC2046 # one word per container id
   set -- $(docker ps -aq --filter "label=devcontainer.local_folder=$root" --filter "label=devcontainer.config_file=$config")
-  [ $# -eq 0 ] || docker rm -f "$@" >/dev/null || exit
+  [ $# -eq 0 ] || docker rm -f "$@" >/dev/null || return
   echo $#
 }
 
@@ -93,7 +93,8 @@ if ! "${up[@]}" >"$log" 2>&1; then
   tail -n 30 "$log" >&2
   # The CLI marks postStartCommand (the firewall) as done before it runs, so a
   # container left behind by a failed start would skip the firewall on the next up.
-  remove_containers >/dev/null
+  # A failed removal must not hide the start failure below.
+  remove_containers >/dev/null || true
   die "could not start the sandbox; full log: $log"
 fi
 rm -f "$log"
@@ -101,12 +102,14 @@ rm -f "$log"
 # Codex logins need no AWS, so they skip the guardrail check.
 if [ "$cmd" != shell ] && ! { [ "$cmd" = codex ] && [ "${1:-}" = login ]; }; then
   status=0
+  # The hook prints nothing when the guardrail answers, else a block decision whose reason is
+  # printed here. pipefail keeps a crashed hook from reading as a pass.
   # shellcheck disable=SC2016 # $1 expands inside the container
-  out=$(devcontainer exec "${dc[@]}" sh -c 'printf %s "$1" | node /opt/phi-guard/dist/codex-prompt.mjs' _ \
+  out=$(devcontainer exec "${dc[@]}" bash -o pipefail -c \
+    'printf %s "$1" | node /opt/phi-guard/dist/codex-prompt.mjs | jq -r .reason' _ \
     '{"prompt":"nophi health check"}' </dev/null 2>/dev/null) || status=$?
   if [ "$status" != 0 ] || [ -n "$out" ]; then
-    reason=$(printf %s "$out" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
-    echo "nophi: the guardrail health check failed: ${reason:-${out:-exit status $status}}" >&2
+    echo "nophi: the guardrail health check failed: ${out:-exit status $status}" >&2
     die "if this is a credentials error, run good-morning on this machine"
   fi
 fi
@@ -134,6 +137,4 @@ fi
 
 agent=$cmd
 [ "$cmd" != shell ] || agent=zsh
-status=0
-devcontainer exec "${dc[@]}" --remote-env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 "$agent" "$@" || status=$?
-exit "$status"
+devcontainer exec "${dc[@]}" --remote-env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 "$agent" "$@"

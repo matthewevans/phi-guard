@@ -1,18 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { Scan } from '../src/guardrail.ts';
-import { maskBashOutput } from '../src/hooks/bash-output.ts';
+import { maskBashOutput, withheld, type BashResponse } from '../src/hooks/bash-output.ts';
 import { checkPrompt } from '../src/hooks/prompt.ts';
-
-const clean: Scan = async (text) => ({ intervened: false, text, findings: [] });
-
-/** Masks every occurrence of `secret` as {NAME}. */
-const masking =
-  (secret: string): Scan =>
-  async (text) =>
-    text.includes(secret)
-      ? { intervened: true, text: text.replaceAll(secret, '{NAME}'), findings: ['NAME'] }
-      : { intervened: false, text, findings: [] };
+import { clean, masking, recording } from './fakes.ts';
 
 const bash = { stdout: '', stderr: '', interrupted: false, isImage: false };
 
@@ -43,12 +33,26 @@ test('bash: masks stdout and stderr independently and keeps extra fields', async
 });
 
 test('bash: skips scanning empty streams', async () => {
-  const scanned: string[] = [];
-  await maskBashOutput({ ...bash, stdout: 'out' }, async (text) => {
-    scanned.push(text);
-    return { intervened: false, text, findings: [] };
-  });
-  assert.deepEqual(scanned, ['out']);
+  const { scan, seen } = recording();
+  await maskBashOutput({ ...bash, stdout: 'out' }, scan);
+  assert.deepEqual(seen, ['out']);
+});
+
+test('bash: rejects a tool_response without stdout and stderr strings instead of passing it unscanned', async () => {
+  const { scan, seen } = recording();
+  for (const response of [{}, { output: 'Jane Roe' }, { ...bash, stdout: undefined }, { ...bash, stderr: null }]) {
+    await assert.rejects(maskBashOutput(response as unknown as BashResponse, scan), { name: 'InvalidHookInput' });
+  }
+  assert.deepEqual(seen, []);
+});
+
+test('bash: a withheld replacement has the full Bash shape even when the response is empty', () => {
+  const { stdout, stderr, interrupted, isImage } = withheld({} as BashResponse, 'test').hookSpecificOutput
+    .updatedToolOutput as BashResponse;
+  assert.equal(typeof stdout, 'string');
+  assert.equal(stderr, '');
+  assert.equal(interrupted, false);
+  assert.equal(isImage, false);
 });
 
 test('bash: withholds image output it cannot scan', async () => {

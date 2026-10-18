@@ -34,7 +34,10 @@ const joined = (items: readonly Part[], separator: string): Part =>
 const quoted = (cell: Part): Part => ['"', cell, '"'];
 /** Prints each labelled value with `show`, separated by `separator`. */
 const each = (row: Row, show: (label: string, cell: Part) => Part, separator: string): Part =>
-  joined(row.map(([label, cell]) => show(label, cell)), separator);
+  joined(
+    row.map(([label, cell]) => show(label, cell)),
+    separator,
+  );
 const textOf = (cell: Part) => flatten(cell).text;
 
 function csv(rows: readonly Row[]): Part {

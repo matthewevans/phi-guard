@@ -10,10 +10,7 @@ export type BashOutcome =
   | { kind: 'withheld' }
   | { kind: 'error'; name: string };
 
-export type PromptOutcome =
-  | { kind: 'passed' }
-  | { kind: 'blocked'; types: string[] }
-  | { kind: 'error'; name: string };
+export type PromptOutcome = { kind: 'passed' } | { kind: 'blocked'; types: string[] } | { kind: 'error'; name: string };
 
 const unrecognized = { kind: 'error', name: UNRECOGNIZED_OUTPUT } as const;
 

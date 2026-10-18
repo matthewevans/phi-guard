@@ -56,8 +56,8 @@ container is its boundary. The guardrail values are not in the repo. Export
 the host environment before the image is built, which fails with the names of any that
 are empty. `PHI_GUARD_AWS_PROFILE` is optional: unset means `phi-guard`, and set but empty means the
 default AWS credential chain. A container
-keeps the image it was created from, so after changing a value rebuild it
-(`nophi --rebuild`).
+keeps the image it was created from, so after changing a guardrail variable or
+`PHI_GUARD_FIREWALL` rebuild it (`nophi --rebuild`).
 
 The container mounts your host `~/.aws` and `~/.npmrc` read-only. The hooks call
 Bedrock with the AWS profile above (`phi-guard` unless you export another), so add a
@@ -67,22 +67,20 @@ Bedrock with the AWS profile above (`phi-guard` unless you export another), so a
 
 Sign in to Claude Code and Codex inside the container. Both logins live in the Docker
 volumes `phi-guard-claude-config` and `phi-guard-codex-config`, which every repo's
-container shares and which are separate from the host's `~/.claude` and `~/.codex`.
+container shares and which are separate from the host's `~/.claude` and `~/.codex`. To
+sign out, remove the containers using them and run
+`docker volume rm phi-guard-claude-config phi-guard-codex-config`.
 The sandbox allows no PHI, and its markers say so: a NO PHI IN THIS SANDBOX banner and a
 `[NO PHI]` prompt prefix in interactive shells, a NO PHI Claude Code status line that
 also shows the firewall mode, and the container hostname `phi-guard-sandbox` (shown in
 the Codex status line).
 
-Set `PHI_GUARD_FIREWALL` in the host environment before opening the container. The
-value is fixed when the container is created, and the hooks never read it.
-
-| Value | Egress |
-|---|---|
-| `web` (default) | Any public IPv4 address. Private and internal ranges are rejected, including the cloud metadata address. Web searches, WebFetch and `curl` to public sites work. |
-| `strict` | An allowlist: GitHub, npm, the model providers, Bedrock and STS for your region, the VS Code hosts, the SSO hosts named in `~/.aws/config` and the CodeArtifact hosts in the `registry=` lines of `~/.npmrc`. Add other hosts, such as a CodeArtifact endpoint for pip, with a comma-separated `PHI_GUARD_EXTRA_HOSTS`. A listed host is reachable with all of your mounted credentials. Restart the container after changing `~/.aws/config` or `~/.npmrc`. |
-| `off` | No firewall. What the agent can reach is your responsibility. |
-
-Any other value stops the firewall script before it changes a rule.
+Set `PHI_GUARD_FIREWALL` in the host environment before opening the container:
+`web` (the default), `strict` or `off`. The value is fixed when the container is
+created, and the hooks never read it. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#firewall-modes)
+says what each mode allows. In `strict` mode, add other hosts, such as a CodeArtifact
+endpoint for pip, with a comma-separated `PHI_GUARD_EXTRA_HOSTS`, and restart the
+container after changing `~/.aws/config` or `~/.npmrc`.
 
 ## Launcher
 
@@ -108,8 +106,7 @@ nophi codex login --device-auth
 ```
 
 Flags go before the subcommand and everything after it passes to the agent.
-`--rebuild` recreates the container, which you need after changing
-`PHI_GUARD_FIREWALL` or a guardrail variable. The sandbox mounts your working tree, so edits land in your
+`--rebuild` recreates the container. The sandbox mounts your working tree, so edits land in your
 checkout. Git worktrees do not work inside it, because a worktree's `.git` file
 points at a host path.
 
@@ -117,10 +114,10 @@ Before it starts, `nophi` stops if the repo holds untracked or gitignored files 
 a data-like extension (`csv`, `tsv`, `xls`, `xlsx`, `parquet`, `avro`, `orc`,
 `jsonl`, `ndjson`, `sql`, `dump`, `bak`, `sqlite`, `sqlite3`, `db`), lists up to ten
 of them, and proceeds only when they are moved out or you pass
-`--i-checked-no-phi`. Files inside nested git repos or submodules are not listed, and
-compressed exports (`.gz`, `.zip`) are not matched. After the container starts it
-sends one benign prompt through the Codex prompt hook to prove that the guardrail
-answers. If that fails, the usual
+`--i-checked-no-phi`. The [launcher section of
+ARCHITECTURE.md](docs/ARCHITECTURE.md#launcher) lists what the stop misses. After the
+container starts it sends one benign prompt through the Codex prompt hook to prove
+that the guardrail answers. If that fails, the usual
 cause is an expired AWS session: run `good-morning` on this machine. `nophi shell`
 and `nophi codex login` skip that check. Claude's first-run login comes after that check, so
 sign in once AWS works, or run `claude` from `nophi shell`.
@@ -132,7 +129,7 @@ and a NO PHI badge. Claude Code keeps that title (`CLAUDE_CODE_DISABLE_TERMINAL_
 Codex sets its own title; the tint, tab colour and its `phi-guard-sandbox` status line
 remain.
 
-`brew upgrade nophi` leaves the previous version's containers running. List them with
+After `brew upgrade nophi`, remove the previous version's containers. List them with
 `docker ps --filter label=devcontainer.config_file`, remove them with `docker rm -f`,
 or use Docker Desktop.
 
@@ -186,9 +183,10 @@ pnpm check
 pnpm e2e
 ```
 
-`pnpm check` runs the typecheck, the tests, a build, a check that the committed
-`dist/` matches a fresh build, `claude plugin validate . --strict`, and
-`cfn-lint` on `infra/guardrail.yaml` (skipped with a warning if `uvx` is missing).
+`pnpm check` runs the typecheck, a Prettier check, the tests, a build, a check that the
+committed `dist/` matches a fresh build, `shellcheck` on every shell script (skipped with a
+warning if it is missing), `claude plugin validate . --strict`, and `cfn-lint` on
+`infra/guardrail.yaml` (skipped with a warning if `uvx` is missing).
 Node 22.18 or newer is required.
 
 `pnpm e2e` is manual and not part of `pnpm check`. It runs the hooks against the
@@ -201,14 +199,11 @@ against the real guardrail. `scripts/e2e.sh` lists each scenario and its expecte
 
 ## Evals
 
-`pnpm eval` measures what the shipped Claude hooks do with a real guardrail on a labelled,
-synthetic corpus: recall by Safe Harbor identifier category and format, false positives on
-dev output that only looks like identifiers, scan errors, hook latency, text units and
-estimated cost. It spawns `dist/bash-output.mjs` for every case and `dist/prompt.mjs` for
-prompt-shaped cases (prose and tickets) exactly as `hooks/hooks.json` registers them, so it
-is also the harness for the Part 2 checks on the regex dialect, the input and output
-actions, the mask tag format, latency and size limits. It makes no model calls and costs
-only the Guardrails text units (a full run is about 3,000 of them, roughly $0.30 per target).
+`pnpm eval` runs a labelled synthetic corpus through the shipped Claude hooks and a real
+guardrail, and reports recall, false positives, scan errors, hook latency, text units and
+estimated cost. It spawns `dist/bash-output.mjs` and `dist/prompt.mjs` as `hooks/hooks.json`
+registers them, makes no model calls, and costs only the Guardrails text units; the
+report prints the units and the estimate.
 
 ```
 pnpm eval --list                      # case ids, formats and categories, no network
@@ -228,20 +223,16 @@ exits non-zero when nothing ran, when any case errors outside the size probes, o
 printed output the evals cannot read. Recall, leaks, gaps and false positives only appear in the
 report, because name detection is ML-based.
 
-The corpus is generated deterministically from a fixed seed, with synthetic values only
-(reserved email domains, the fictional 555-01xx phone range, published test card numbers,
-never-issued or labelled format-valid SSNs). Company formats such as member IDs and claim
-numbers belong in `evals/local/*.jsonl` (gitignored, one case per line in the same schema);
-their categories report only when such a file exists. To compare date policies, deploy
+Company formats such as member IDs and claim numbers belong in `evals/local/*.jsonl`
+(gitignored, one case per line in the same schema); their categories report only when such a
+file exists. To compare date policies, deploy
 `infra/guardrail.yaml` a second time as another stack with `DatePolicy=All`, give the work
 profile `bedrock:ApplyGuardrail` on both guardrails, and pass both as targets.
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#evals) describes what is measured and which
-categories are known gaps.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#evals) describes the corpus, what is
+measured and which categories are known gaps.
 
 ## Cost
 
 The Guardrails PII filter costs $0.10 per 1,000 text units and regexes are free.
-That is about $0.20 per developer per month for prompts only, about $5 with Bash
-output, and about $40 for heavy agentic use. Codex scans one capture per command,
-at most about 20,000 bytes of it. See the cost section of
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#cost-guardrails-pii-filter-at-010-per-1000-text-units-regexes-free).
+The [cost section of docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#cost-guardrails-pii-filter-at-010-per-1000-text-units-regexes-free)
+has the per-developer estimates and how each agent's scans are counted.

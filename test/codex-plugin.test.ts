@@ -9,17 +9,15 @@ const root = new URL('../', import.meta.url);
 const readJson = (path: string) => JSON.parse(readFileSync(new URL(path, root), 'utf8'));
 
 const manifest = readJson('.codex-plugin/plugin.json');
-const hooks: Record<string, { matcher?: string; hooks: Record<string, unknown>[] }[]> = readJson(
-  'hooks/codex-hooks.json',
-).hooks;
+const hooks: Record<string, { matcher?: string; hooks: Record<string, unknown>[] }[]> =
+  readJson('hooks/codex-hooks.json').hooks;
 
 test('the manifest names the plugin like the Claude Code one and points at an existing hooks file', () => {
   const claude = readJson('.claude-plugin/plugin.json');
   assert.equal(manifest.name, claude.name);
   assert.equal(manifest.version, claude.version);
-  assert.match(manifest.hooks, /^\.\//, 'Codex requires ./-relative manifest paths');
+  assert.equal(manifest.hooks, './hooks/codex-hooks.json', 'Codex requires ./-relative manifest paths');
   assert.ok(existsSync(new URL(manifest.hooks, root)));
-  assert.equal(manifest.hooks, './hooks/codex-hooks.json');
 });
 
 test('hooks cover the prompt, and Bash before and after', () => {

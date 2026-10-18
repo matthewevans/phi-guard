@@ -20,7 +20,7 @@ const filler = (second: number) =>
 
 function mixedLog(size: number): Part {
   const lines: Part[] = [];
-  for (let length = 0; length < size; ) {
+  for (let length = 0; length < size;) {
     const line = filler(lines.length);
     lines.push(line);
     length += line.length + 1;

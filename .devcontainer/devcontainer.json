@@ -15,16 +15,10 @@
       "PHI_GUARD_AWS_PROFILE": "${localEnv:PHI_GUARD_AWS_PROFILE:phi-guard}"
     }
   },
-  "runArgs": [
-    "--cap-add=NET_ADMIN",
-    "--cap-add=NET_RAW",
-    "--hostname=phi-guard-sandbox"
-  ],
+  "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW", "--hostname=phi-guard-sandbox"],
   "customizations": {
     "vscode": {
-      "extensions": [
-        "anthropic.claude-code"
-      ],
+      "extensions": ["anthropic.claude-code"],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "zsh",
         "terminal.integrated.profiles.linux": {

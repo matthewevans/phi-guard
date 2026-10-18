@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Everything CI-like that runs offline: types, tests, dist/ freshness, plugin
-# manifests and the CloudFormation template.
+# Everything CI-like that runs offline: types, formatting, tests, dist/ freshness, shell
+# lint, plugin manifests and the CloudFormation template.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 pnpm typecheck
+pnpm format:check
 pnpm test
 
 fresh=$(mktemp -d)
@@ -16,9 +17,9 @@ if ! diff -rq "$fresh" dist; then
 fi
 
 if command -v shellcheck >/dev/null; then
-  shellcheck bin/nophi
+  shellcheck bin/nophi scripts/*.sh .devcontainer/*.sh
 else
-  echo "warning: shellcheck not found, skipping bin/nophi lint" >&2
+  echo "warning: shellcheck not found, skipping shell lint" >&2
 fi
 
 claude plugin validate . --strict

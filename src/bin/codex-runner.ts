@@ -5,16 +5,15 @@
 import { spawn } from 'node:child_process';
 import { closeSync, constants, openSync, writeSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
-import { failureName } from '../hooks/codex-command.ts';
-import { exitAfterWrite } from '../hooks/deadline.ts';
+import { failureName, namedError, withheldNotice } from '../errors.ts';
+import { exitAfterWrite } from '../hook-io.ts';
 
 const MARKER = '[phi-guard: output captured for scanning]\n';
-const withheld = (why: string) => `[phi-guard: output withheld, ${why}]\n`;
 const [capturePath, encoded] = process.argv.slice(2);
 
 let fd: number | undefined;
 try {
-  if (!capturePath || !encoded) throw Object.assign(new Error('missing arguments'), { name: 'InvalidArguments' });
+  if (!capturePath || !encoded) throw namedError('InvalidArguments', 'missing arguments');
   // Exclusive and no-follow: never write through a path another process planted.
   fd = openSync(capturePath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
 
@@ -46,7 +45,7 @@ try {
   exitAfterWrite(process.stdout, MARKER, code);
 } catch (error) {
   const why = fd === undefined ? 'capture dir not writable under the current sandbox' : 'runner failed';
-  const line = withheld(`${why} (${failureName(error)})`);
+  const line = withheldNotice(`${why} (${failureName(error)})`) + '\n';
   if (fd !== undefined) {
     // PostToolUse reads the capture, so leave the cause there instead of an empty file.
     try {

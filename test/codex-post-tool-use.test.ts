@@ -1,39 +1,27 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import type { Scan } from '../src/guardrail.ts';
 import { wrapCommand, type CodexPaths } from '../src/hooks/codex-command.ts';
 import { maskCodexOutput } from '../src/hooks/codex-post-tool-use.ts';
+import { clean, masking, recording } from './fakes.ts';
 
 const uid = process.getuid!();
 const scratch = mkdtempSync(join(tmpdir(), 'phi-guard-post-'));
+after(() => rmSync(scratch, { recursive: true, force: true }));
 const MARKER = '[phi-guard: output captured for scanning]\n';
-
-const clean: Scan = async (text) => ({ intervened: false, text, findings: [] });
-
-/** Masks every occurrence of `secret` as {NAME}. */
-const masking =
-  (secret: string): Scan =>
-  async (text) =>
-    text.includes(secret)
-      ? { intervened: true, text: text.replaceAll(secret, '{NAME}'), findings: ['NAME'] }
-      : { intervened: false, text, findings: [] };
-
-function recording() {
-  const seen: string[] = [];
-  const scan: Scan = async (text) => {
-    seen.push(text);
-    return { intervened: false, text, findings: [] };
-  };
-  return { scan, seen };
-}
 
 function setup() {
   const captureDir = mkdtempSync(join(scratch, 'dir-'));
-  const paths: CodexPaths = { execPath: '/usr/bin/node', runnerPath: '/opt/phi-guard/dist/codex-runner.mjs', captureDir, uid };
+  const paths: CodexPaths = {
+    execPath: '/usr/bin/node',
+    runnerPath: '/opt/phi-guard/dist/codex-runner.mjs',
+    captureDir,
+    uid,
+  };
   const id = randomUUID();
   const capturePath = join(captureDir, `${id}.out`);
   const input = (command = 'echo hi') => ({
@@ -215,9 +203,24 @@ test('unwrapped, empty: skips scanning', async () => {
   assert.deepEqual(seen, []);
 });
 
+test('unwrapped, empty command: accepted, because the command is only matched against the runner form', async () => {
+  const { paths } = setup();
+  const input = { tool_input: { command: '' }, tool_response: 'zebra-fake-1' };
+
+  const output = await maskCodexOutput(input, masking('zebra-fake-1'), paths);
+
+  assert.equal(output?.decision, 'block');
+  assert.match(output!.reason, /^\{NAME\}\n/);
+});
+
 test('rejects input it cannot interpret so the entrypoint withholds', async () => {
   const { paths } = setup();
-  for (const input of [null, {}, { tool_input: { command: 'ls' } }, { tool_input: { command: 'ls' }, tool_response: { stdout: 'x' } }]) {
+  for (const input of [
+    null,
+    {},
+    { tool_input: { command: 'ls' } },
+    { tool_input: { command: 'ls' }, tool_response: { stdout: 'x' } },
+  ]) {
     await assert.rejects(maskCodexOutput(input, clean, paths), { name: 'InvalidHookInput' });
   }
 });

@@ -1,9 +1,10 @@
 // What the Codex PreToolUse and PostToolUse hooks agree on: the runner command line
-// PreToolUse emits, the capture directory it points into, and the failure names
-// both report. Must not import the AWS SDK: the runner bundle shares this module.
+// PreToolUse emits, the capture directory it points into, and the command both read.
+// Must not import the AWS SDK: the runner bundle shares this module.
 import { randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { failureName, namedError } from '../errors.ts';
 
 export interface CodexPaths {
   execPath: string;
@@ -30,7 +31,11 @@ const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const BASE64 = '(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?';
 
-export function wrapCommand({ execPath, runnerPath, captureDir }: CodexPaths, command: string, id: string = randomUUID()) {
+export function wrapCommand(
+  { execPath, runnerPath, captureDir }: CodexPaths,
+  command: string,
+  id: string = randomUUID(),
+) {
   const capturePath = `${captureDir}/${id}.out`;
   const encoded = Buffer.from(command, 'utf8').toString('base64');
   return `${quote(execPath)} ${quote(runnerPath)} ${quote(capturePath)} ${encoded}`;
@@ -53,7 +58,7 @@ export function parseWrapped({ execPath, runnerPath, captureDir }: CodexPaths, c
 export function verifyCaptureDir(dir: string, uid: number): void {
   const stat = lstatSync(dir);
   if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 0o077) !== 0) {
-    throw Object.assign(new Error('capture dir failed verification'), { name: 'UnsafeCaptureDir' });
+    throw namedError('UnsafeCaptureDir', 'capture dir failed verification');
   }
 }
 
@@ -66,9 +71,9 @@ export function ensureCaptureDir(dir: string, uid: number): void {
   verifyCaptureDir(dir, uid);
 }
 
-/** Errno code or error name only: messages can carry paths or quote the input. */
-export function failureName(error: unknown): string {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === 'string' && /^E[A-Z0-9_]+$/.test(code)) return code;
-  return error instanceof Error ? error.name : 'UnknownError';
+/** The `tool_input.command` of a Codex hook payload. */
+export function commandOf(input: unknown): string {
+  const command = (input as { tool_input?: { command?: unknown } } | null)?.tool_input?.command;
+  if (typeof command !== 'string') throw namedError('InvalidHookInput', 'missing tool_input.command');
+  return command;
 }

@@ -1,7 +1,31 @@
-import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);
-
 // src/bin/codex-pre-tool-use.ts
 import { json } from "node:stream/consumers";
+
+// src/errors.ts
+var namedError = (name, message) => Object.assign(new Error(message), { name });
+function failureName(error) {
+  const code = error?.code;
+  if (typeof code === "string" && /^E[A-Z0-9_]+$/.test(code)) return code;
+  return error instanceof Error ? error.name : "UnknownError";
+}
+
+// src/hook-io.ts
+var HOOK_DEADLINE_MS = 15e3;
+async function withDeadline(work, ms = HOOK_DEADLINE_MS) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(namedError("HookDeadlineExceeded", "hook deadline exceeded")), ms);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([work(), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function exitAfterWrite(stream, text, code) {
+  stream.write(text ?? "", () => process.exit(code));
+}
 
 // src/hooks/codex-command.ts
 import { randomUUID } from "node:crypto";
@@ -35,7 +59,7 @@ function parseWrapped({ execPath, runnerPath, captureDir }, command) {
 function verifyCaptureDir(dir, uid) {
   const stat = lstatSync(dir);
   if (!stat.isDirectory() || stat.uid !== uid || (stat.mode & 63) !== 0) {
-    throw Object.assign(new Error("capture dir failed verification"), { name: "UnsafeCaptureDir" });
+    throw namedError("UnsafeCaptureDir", "capture dir failed verification");
   }
 }
 function ensureCaptureDir(dir, uid) {
@@ -46,18 +70,16 @@ function ensureCaptureDir(dir, uid) {
   }
   verifyCaptureDir(dir, uid);
 }
-function failureName(error) {
-  const code = error?.code;
-  if (typeof code === "string" && /^E[A-Z0-9_]+$/.test(code)) return code;
-  return error instanceof Error ? error.name : "UnknownError";
+function commandOf(input) {
+  const command = input?.tool_input?.command;
+  if (typeof command !== "string") throw namedError("InvalidHookInput", "missing tool_input.command");
+  return command;
 }
 
 // src/hooks/codex-pre-tool-use.ts
 function rewriteCommand(input, paths) {
-  const command = input?.tool_input?.command;
-  if (typeof command !== "string" || command === "") {
-    throw Object.assign(new Error("missing tool_input.command"), { name: "InvalidHookInput" });
-  }
+  const command = commandOf(input);
+  if (command === "") throw namedError("InvalidHookInput", "empty tool_input.command");
   if (parseWrapped(paths, command) !== void 0) return void 0;
   ensureCaptureDir(paths.captureDir, paths.uid);
   return {
@@ -69,32 +91,10 @@ function rewriteCommand(input, paths) {
   };
 }
 
-// src/hooks/deadline.ts
-var HOOK_DEADLINE_MS = 15e3;
-async function withDeadline(work, ms) {
-  let timer;
-  const expired = new Promise((_, reject) => {
-    timer = setTimeout(
-      () => reject(Object.assign(new Error("hook deadline exceeded"), { name: "HookDeadlineExceeded" })),
-      ms
-    );
-    timer.unref();
-  });
-  try {
-    return await Promise.race([work, expired]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function exitAfterWrite(stream, text, code) {
-  stream.write(text ?? "", () => process.exit(code));
-}
-
 // src/bin/codex-pre-tool-use.ts
 try {
   const output = await withDeadline(
-    (async () => rewriteCommand(await json(process.stdin), currentPaths(import.meta.url)))(),
-    HOOK_DEADLINE_MS
+    async () => rewriteCommand(await json(process.stdin), currentPaths(import.meta.url))
   );
   exitAfterWrite(process.stdout, output && JSON.stringify(output), 0);
 } catch (error) {

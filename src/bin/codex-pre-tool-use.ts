@@ -1,12 +1,12 @@
 import { json } from 'node:stream/consumers';
-import { currentPaths, failureName } from '../hooks/codex-command.ts';
+import { failureName } from '../errors.ts';
+import { exitAfterWrite, withDeadline } from '../hook-io.ts';
+import { currentPaths } from '../hooks/codex-command.ts';
 import { rewriteCommand } from '../hooks/codex-pre-tool-use.ts';
-import { exitAfterWrite, HOOK_DEADLINE_MS, withDeadline } from '../hooks/deadline.ts';
 
 try {
-  const output = await withDeadline(
-    (async () => rewriteCommand(await json(process.stdin), currentPaths(import.meta.url)))(),
-    HOOK_DEADLINE_MS,
+  const output = await withDeadline(async () =>
+    rewriteCommand(await json(process.stdin), currentPaths(import.meta.url)),
   );
   exitAfterWrite(process.stdout, output && JSON.stringify(output), 0);
 } catch (error) {

@@ -25,7 +25,14 @@ const formatErrors = (errors: Record<string, number>) =>
 /** Left-aligns each column to its widest cell. */
 function aligned(rows: string[][]): string {
   const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)));
-  return rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column])).join('  ').trimEnd()).join('\n');
+  return rows
+    .map((row) =>
+      row
+        .map((cell, column) => cell.padEnd(widths[column]))
+        .join('  ')
+        .trimEnd(),
+    )
+    .join('\n');
 }
 
 const table = (headers: string[], rows: string[][]) => aligned([headers, ...rows]);
@@ -138,11 +145,14 @@ export function formatReport(target: string, runs: readonly Run[]): string {
         ['mask tags seen', output.tags.join(', ') || 'none'],
       ]),
     ),
-    section('By category (values)', table(
-        ['category', 'coverage', 'values', 'recall', 'leaked', 'withheld cases'],
-        categoryRows(runs),
-      )),
-    section('By format', table(['format', 'cases', 'recall', 'false positives', 'withheld', 'errors'], formatRows(runs))),
+    section(
+      'By category (values)',
+      table(['category', 'coverage', 'values', 'recall', 'leaked', 'withheld cases'], categoryRows(runs)),
+    ),
+    section(
+      'By format',
+      table(['format', 'cases', 'recall', 'false positives', 'withheld', 'errors'], formatRows(runs)),
+    ),
     section(
       'Size probes',
       table(['case', 'characters', 'text units', 'outcome', 'leaked values', 'ms'], sizeProbeRows(runs)),

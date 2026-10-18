@@ -5,6 +5,7 @@ import {
   type ApplyGuardrailCommandOutput,
   type GuardrailContentSource,
 } from '@aws-sdk/client-bedrock-runtime';
+import { namedError } from './errors.ts';
 
 export type ApplyGuardrail = (
   input: ApplyGuardrailCommandInput,
@@ -25,11 +26,7 @@ export type Scan = (text: string, source: GuardrailContentSource) => Promise<Sca
 // the hook's own fail-closed path instead of being killed by Claude Code.
 const SCAN_TIMEOUT_MS = 10_000;
 
-export function createScanner(
-  apply: ApplyGuardrail,
-  guardrailIdentifier: string,
-  guardrailVersion: string,
-): Scan {
+export function createScanner(apply: ApplyGuardrail, guardrailIdentifier: string, guardrailVersion: string): Scan {
   return async (text, source) => {
     const response = await apply(
       { guardrailIdentifier, guardrailVersion, source, content: [{ text: { text } }] },
@@ -39,9 +36,7 @@ export function createScanner(
     // partial scan must not look like a clean one.
     const { guarded, total } = response.guardrailCoverage?.textCharacters ?? {};
     if (total !== undefined && (guarded ?? 0) < total) {
-      throw Object.assign(new Error(`the guardrail scanned ${guarded ?? 0} of ${total} characters`), {
-        name: 'PartialGuardrailCoverage',
-      });
+      throw namedError('PartialGuardrailCoverage', `the guardrail scanned ${guarded ?? 0} of ${total} characters`);
     }
     if (response.action !== 'GUARDRAIL_INTERVENED') {
       return { intervened: false, text, findings: [] };
@@ -49,13 +44,13 @@ export function createScanner(
 
     const policies = (response.assessments ?? []).flatMap((a) => a.sensitiveInformationPolicy ?? []);
     const findings = new Set([
-      ...policies.flatMap((p) => p.piiEntities ?? []).filter((e) => e.action !== 'NONE').map((e) => e.type),
-      ...policies.flatMap((p) => p.regexes ?? []).filter((r) => r.action !== 'NONE').map((r) => r.name),
+      ...policies.flatMap((p) => p.piiEntities ?? []).flatMap((e) => (e.action !== 'NONE' && e.type ? [e.type] : [])),
+      ...policies.flatMap((p) => p.regexes ?? []).flatMap((r) => (r.action !== 'NONE' && r.name ? [r.name] : [])),
     ]);
     return {
       intervened: true,
       text: (response.outputs ?? []).map((o) => o.text ?? '').join(''),
-      findings: [...findings].filter((f) => f !== undefined),
+      findings: [...findings],
     };
   };
 }
@@ -73,7 +68,7 @@ export function readConfig(prefix: string, env: NodeJS.ProcessEnv = process.env)
   const missing = required.filter((name) => !env[name]);
   if (missing.length > 0) {
     // Variable names only, never values.
-    throw Object.assign(new Error(`${missing.join(', ')} must be set`), { name: 'MissingGuardrailConfig' });
+    throw namedError('MissingGuardrailConfig', `${missing.join(', ')} must be set`);
   }
   const [guardrailId, guardrailVersion, region] = required.map((name) => env[name]!);
   return { guardrailId, guardrailVersion, region, profile: env[`${prefix}AWS_PROFILE`] || undefined };
@@ -81,7 +76,7 @@ export function readConfig(prefix: string, env: NodeJS.ProcessEnv = process.env)
 
 export function createClient({ region, profile }: Pick<GuardrailConfig, 'region' | 'profile'>): BedrockRuntimeClient {
   // AWS_ENDPOINT_URL* and shared-config endpoint_url could otherwise redirect scans to a fake "NONE" answer.
-  return new BedrockRuntimeClient({ region, ignoreConfiguredEndpointUrls: true, ...(profile && { profile }) });
+  return new BedrockRuntimeClient({ region, ignoreConfiguredEndpointUrls: true, profile });
 }
 
 export function scannerFromConfig(prefix: string): Scan {
@@ -92,9 +87,4 @@ export function scannerFromConfig(prefix: string): Scan {
     guardrailId,
     guardrailVersion,
   );
-}
-
-/** Error name only: messages can quote the input, and hook output may reach the model. */
-export function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : 'UnknownError';
 }

@@ -1,7 +1,6 @@
 // The devcontainer's managed agent config is plain text that only the agents read at
 // startup, so a typo would silently drop phi-guard. These checks keep it in step with
-// the shipped plugin manifests and hooks files. Codex requirements are TOML, parsed
-// here by a tiny reader that only knows the shapes the file uses (no TOML dependency).
+// the shipped plugin manifests and hooks files.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -9,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'smol-toml';
 
 const root = new URL('../', import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), 'utf8');
@@ -16,25 +16,13 @@ const readJson = (path: string) => JSON.parse(read(path));
 
 const PLUGIN_DIR = '/opt/phi-guard';
 
-type Table = { header: string; values: Record<string, unknown> };
+// smol-toml returns tables without a prototype, which strict deepEqual tells apart from plain objects.
+const readToml = (path: string): Record<string, unknown> => JSON.parse(JSON.stringify(parse(read(path))));
 
-// Values are JSON-compatible TOML: basic strings, integers, booleans and string arrays.
-const parseToml = (text: string): { top: Record<string, unknown>; tables: Table[] } => {
-  const top: Record<string, unknown> = {};
-  const tables: Table[] = [];
-  for (const line of text.split('\n')) {
-    const content = line.trim();
-    if (content === '' || content.startsWith('#')) continue;
-    const header = /^\[{1,2}([\w.]+)\]{1,2}$/.exec(content);
-    if (header) {
-      tables.push({ header: header[1], values: {} });
-      continue;
-    }
-    const pair = /^(\w+) = (.+)$/.exec(content);
-    assert.ok(pair, `unsupported TOML line: ${content}`);
-    (tables.at(-1)?.values ?? top)[pair[1]] = JSON.parse(pair[2]);
-  }
-  return { top, tables };
+// Narrows a parsed TOML value where a test needs to call array methods on it.
+const stringsAt = (value: unknown): string[] => {
+  assert.ok(Array.isArray(value) && value.every((item) => typeof item === 'string'));
+  return value;
 };
 
 const claudePlugin = readJson('.claude-plugin/plugin.json');
@@ -42,8 +30,8 @@ const marketplace = readJson('.claude-plugin/marketplace.json');
 const pluginId = `${claudePlugin.name}@${marketplace.name}`;
 const claudeSettings = readJson('.devcontainer/claude-code/phi-guard.json');
 
-const requirements = parseToml(read('.devcontainer/codex/requirements.toml'));
-const managedConfig = parseToml(read('.devcontainer/codex/managed_config.toml'));
+const requirements = readToml('.devcontainer/codex/requirements.toml');
+const managedConfig = readToml('.devcontainer/codex/managed_config.toml');
 const devcontainer = JSON.parse(read('.devcontainer/devcontainer.json').replace(/^\/\/.*$/gm, ''));
 const dockerfile = read('.devcontainer/Dockerfile');
 // The image build adds the pluginConfigs options to the managed settings: one jq --arg
@@ -52,10 +40,7 @@ const optionArgs = [...dockerfile.matchAll(/--arg (\w+) "\$(PHI_GUARD_\w+)"/g)].
   key: match[1],
   variable: match[2],
 }));
-const firewall = read('.devcontainer/init-firewall.sh');
-
-const hookTables = (event: string) =>
-  requirements.tables.filter((table) => table.header === `hooks.${event}.hooks`).map((table) => table.values);
+const firewallScript = fileURLToPath(new URL('.devcontainer/init-firewall.sh', root));
 
 test('Claude managed settings register and force-enable the plugin with matching option keys', () => {
   assert.deepEqual(claudeSettings.extraKnownMarketplaces[marketplace.name], {
@@ -98,7 +83,9 @@ test('the host environment feeds the build args, and the AWS profile defaults to
     Object.fromEntries(
       optionArgs.map(({ variable }) => [
         variable,
-        variable === 'PHI_GUARD_AWS_PROFILE' ? '${localEnv:PHI_GUARD_AWS_PROFILE:phi-guard}' : `\${localEnv:${variable}}`,
+        variable === 'PHI_GUARD_AWS_PROFILE'
+          ? '${localEnv:PHI_GUARD_AWS_PROFILE:phi-guard}'
+          : `\${localEnv:${variable}}`,
       ]),
     ),
   );
@@ -119,7 +106,7 @@ test('the container hostname and the Codex TUI show the sandbox, with item ids v
   assert.ok(devcontainer.runArgs.includes('--hostname=phi-guard-sandbox'));
   // Ids come from the Codex source (StatusLineItem and TerminalTitleItem). The title list
   // has no hostname item, and an invalid id only produces a warning in the TUI.
-  assert.deepEqual(managedConfig.tables.find((table) => table.header === 'tui')?.values, {
+  assert.deepEqual(managedConfig.tui, {
     status_line: ['hostname', 'model-with-reasoning', 'five-hour-limit', 'weekly-limit', 'current-dir'],
     terminal_title: ['activity', 'project-name'],
   });
@@ -137,7 +124,10 @@ test('the managed Claude status line is the root-owned script that says no PHI a
 });
 
 test('both system rc files source the banner, which stays silent unless the shell is interactive', () => {
-  assert.match(dockerfile, /echo '\. \/opt\/phi-guard\/sandbox-banner\.sh' \| tee -a \/etc\/zsh\/zshrc \/etc\/bash\.bashrc/);
+  assert.match(
+    dockerfile,
+    /echo '\. \/opt\/phi-guard\/sandbox-banner\.sh' \| tee -a \/etc\/zsh\/zshrc \/etc\/bash\.bashrc/,
+  );
   const banner = fileURLToPath(new URL('.devcontainer/sandbox-banner.sh', root));
   const env = { PATH: process.env.PATH, PHI_GUARD_FIREWALL: 'strict' };
   assert.equal(execFileSync('bash', ['-c', '. "$1"', 'bash', banner], { encoding: 'utf8', env }), '');
@@ -146,12 +136,18 @@ test('both system rc files source the banner, which stays silent unless the shel
     env,
     stdio: ['ignore', 'pipe', 'ignore'],
   });
-  assert.match(interactive, /^NO PHI IN THIS SANDBOX\.\n.*personal Claude\/ChatGPT subscription\.\nDo not paste, open or query patient data\. .*\n$/);
+  assert.match(
+    interactive,
+    /^NO PHI IN THIS SANDBOX\.\n.*personal Claude\/ChatGPT subscription\.\nDo not paste, open or query patient data\. .*\n$/,
+  );
 });
 
 test('the Dockerfile env gives Codex the same values as the Claude options, from the same build args', () => {
   const variables = optionArgs.map(({ variable }) => variable);
-  assert.deepEqual([...dockerfile.matchAll(/^ARG (PHI_GUARD_\w+)(?:=\S+)?$/gm)].map((match) => match[1]), variables);
+  assert.deepEqual(
+    [...dockerfile.matchAll(/^ARG (PHI_GUARD_\w+)(?:=\S+)?$/gm)].map((match) => match[1]),
+    variables,
+  );
   assert.deepEqual(
     [...dockerfile.matchAll(/^ENV (PHI_GUARD_\w+)=\$(PHI_GUARD_\w+)$/gm)].map((match) => [match[1], match[2]]),
     variables.map((variable) => [variable, variable]),
@@ -159,49 +155,24 @@ test('the Dockerfile env gives Codex the same values as the Claude options, from
 });
 
 test('Codex managed hooks are the shipped hooks file pointed at the installed plugin', () => {
-  const shipped: Record<string, { matcher?: string; hooks: Record<string, unknown>[] }[]> =
-    readJson('hooks/codex-hooks.json').hooks;
-  assert.deepEqual(
-    requirements.tables.filter((table) => /^hooks\.\w+$/.test(table.header)).map((table) => table.header.slice(6)),
-    Object.keys(shipped),
-  );
-  for (const [event, groups] of Object.entries(shipped)) {
-    const groupTables = requirements.tables.filter((table) => table.header === `hooks.${event}`);
-    assert.deepEqual(
-      groupTables.map((table) => table.values.matcher),
-      groups.map((group) => group.matcher),
-      `${event} matchers`,
-    );
-    assert.deepEqual(
-      hookTables(event),
-      groups.flatMap((group) =>
-        group.hooks.map((hook) => ({
-          type: hook.type,
-          command: (hook.command as string).replaceAll('${PLUGIN_ROOT}', PLUGIN_DIR),
-          timeout: hook.timeout,
-          statusMessage: hook.statusMessage,
-        })),
-      ),
-      `${event} hooks`,
-    );
-  }
-  assert.equal(requirements.tables.find((table) => table.header === 'hooks')?.values.managed_dir, `${PLUGIN_DIR}/dist`);
+  const shipped = JSON.parse(read('hooks/codex-hooks.json').replaceAll('${PLUGIN_ROOT}', PLUGIN_DIR)).hooks;
+  assert.deepEqual(requirements.hooks, { managed_dir: `${PLUGIN_DIR}/dist`, ...shipped });
 });
 
 test('Codex requirements pin hooks on, allow no MCP, and exclude the never approval policy', () => {
-  assert.equal(requirements.top.allow_managed_hooks_only, true);
-  assert.deepEqual(requirements.tables.find((table) => table.header === 'features')?.values, { hooks: true });
-  assert.deepEqual(requirements.tables.find((table) => table.header === 'mcp_servers')?.values, {});
-  assert.deepEqual(requirements.top.allowed_sandbox_modes, ['read-only', 'danger-full-access']);
-  const approvals = requirements.top.allowed_approval_policies as string[];
+  assert.equal(requirements.allow_managed_hooks_only, true);
+  assert.deepEqual(requirements.features, { hooks: true });
+  assert.deepEqual(requirements.mcp_servers, {});
+  assert.deepEqual(requirements.allowed_sandbox_modes, ['read-only', 'danger-full-access']);
+  const approvals = stringsAt(requirements.allowed_approval_policies);
   assert.ok(approvals.length > 0 && !approvals.includes('never'));
 });
 
 test('Codex defaults pick danger-full-access (the container is the boundary) and an allowed approval policy', () => {
-  assert.equal(managedConfig.top.sandbox_mode, 'danger-full-access');
-  assert.ok((requirements.top.allowed_sandbox_modes as string[]).includes(managedConfig.top.sandbox_mode as string));
-  assert.ok((requirements.top.allowed_approval_policies as string[]).includes(managedConfig.top.approval_policy as string));
-  assert.deepEqual(managedConfig.tables.map((table) => table.header), ['tui']);
+  assert.equal(managedConfig.sandbox_mode, 'danger-full-access');
+  assert.ok(stringsAt(requirements.allowed_sandbox_modes).includes(managedConfig.sandbox_mode as string));
+  assert.ok(stringsAt(requirements.allowed_approval_policies).includes(managedConfig.approval_policy as string));
+  assert.deepEqual(Object.keys(managedConfig).sort(), ['approval_policy', 'sandbox_mode', 'tui']);
 });
 
 test('the image pins both CLIs and copies exactly the plugin runtime files', () => {
@@ -212,33 +183,6 @@ test('the image pins both CLIs and copies exactly the plugin runtime files', () 
   assert.deepEqual(copied, ['.claude-plugin', '.codex-plugin', 'hooks', 'dist']);
 });
 
-test('the firewall validates the region before flushing and allows the agents and Bedrock', () => {
-  const script = fileURLToPath(new URL('.devcontainer/init-firewall.sh', root));
-  execFileSync('bash', ['-n', script]);
-  assert.ok(firewall.includes('/etc/claude-code/managed-settings.d/phi-guard.json'));
-  assert.ok(
-    firewall.indexOf('is not an AWS region name') < firewall.indexOf('iptables -F'),
-    'region validation must come before any flush',
-  );
-  assert.ok(
-    firewall.indexOf('optional_hosts=$(') < firewall.indexOf('iptables -F'),
-    'optional host validation must come before any flush',
-  );
-  for (const host of [
-    'api.anthropic.com',
-    'claude.ai',
-    'claude.com',
-    'platform.claude.com',
-    'api.openai.com',
-    'chatgpt.com',
-    'auth.openai.com',
-    'bedrock-runtime.${REGION}.amazonaws.com',
-    'sts.${REGION}.amazonaws.com',
-  ]) {
-    assert.ok(firewall.includes(host), host);
-  }
-});
-
 test('PHI_GUARD_FIREWALL defaults to web, and only the value off skips the firewall script', () => {
   assert.equal(devcontainer.containerEnv.PHI_GUARD_FIREWALL, '${localEnv:PHI_GUARD_FIREWALL:web}');
   assert.equal(devcontainer.containerEnv.PHI_GUARD_EXTRA_HOSTS, '${localEnv:PHI_GUARD_EXTRA_HOSTS:}');
@@ -246,7 +190,10 @@ test('PHI_GUARD_FIREWALL defaults to web, and only the value off skips the firew
   const stubs = mkdtempSync(join(tmpdir(), 'phi-guard-sudo-'));
   try {
     // Prints each argument in brackets, so an empty argument is visible.
-    writeFileSync(join(stubs, 'sudo'), '#!/bin/sh\nprintf sudo; for arg in "$@"; do printf " [%s]" "$arg"; done; echo\n');
+    writeFileSync(
+      join(stubs, 'sudo'),
+      '#!/bin/sh\nprintf sudo; for arg in "$@"; do printf " [%s]" "$arg"; done; echo\n',
+    );
     chmodSync(join(stubs, 'sudo'), 0o755);
     const run = (firewall: string, extraHosts: string) =>
       execFileSync('sh', ['-c', devcontainer.postStartCommand], {
@@ -267,55 +214,174 @@ test('PHI_GUARD_FIREWALL defaults to web, and only the value off skips the firew
   }
 });
 
-test('the firewall rejects an unknown mode before any iptables call', () => {
-  const script = fileURLToPath(new URL('.devcontainer/init-firewall.sh', root));
-  const stubs = mkdtempSync(join(tmpdir(), 'phi-guard-iptables-'));
+// The firewall tests run the real script with every command that could touch the host network
+// replaced by a stub that records its call and answers like a healthy host.
+const SETTINGS = '/etc/claude-code/managed-settings.d/phi-guard.json';
+
+const NETWORK_TOOLS = [
+  'iptables',
+  'iptables-save',
+  'iptables-restore',
+  'ip6tables',
+  'ip6tables-save',
+  'ip6tables-restore',
+  'ipset',
+  'nft',
+  'ip',
+  'dig',
+  'curl',
+  'jq',
+  'aggregate',
+] as const;
+
+const NETWORK_STUBS: Record<(typeof NETWORK_TOOLS)[number], string> = {
+  iptables: '',
+  'iptables-save': '',
+  'iptables-restore': '',
+  ip6tables: '',
+  'ip6tables-save': '',
+  'ip6tables-restore': '',
+  ipset: '',
+  nft: '',
+  aggregate: 'cat',
+  ip: 'echo "default via 172.17.0.1 dev eth0"',
+  dig: 'echo "$4. 300 IN A 192.0.2.10"',
+  // Like behind the firewall, the metadata address and example.com are unreachable.
+  curl: `case "$*" in *169.254.169.254*|*example.com*) exit 1 ;; *api.github.com/meta*) echo '{}' ;; esac`,
+  jq: 'cat >/dev/null\ncase "$1" in -er) echo us-east-2 ;; -r) echo 192.0.2.0/24 ;; esac',
+};
+
+const runFirewall = (args: string[], stubOverrides: Partial<typeof NETWORK_STUBS> = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), 'phi-guard-iptables-'));
   try {
-    // Every firewall tool the script could call records its name in a log.
-    const log = join(stubs, 'calls');
-    for (const tool of ['iptables', 'iptables-save', 'ipset', 'curl', 'jq', 'dig']) {
-      writeFileSync(join(stubs, tool), `#!/bin/sh\necho ${tool} >> "${log}"\n`);
-      chmodSync(join(stubs, tool), 0o755);
+    const log = join(dir, 'calls');
+    for (const [tool, body] of Object.entries({ ...NETWORK_STUBS, ...stubOverrides })) {
+      writeFileSync(join(dir, tool), `#!/bin/sh\necho ${tool} "$*" >> "${log}"\n${body}\n`, { mode: 0o755 });
     }
-    for (const args of [[], [''], ['on'], ['WEB'], ['off'], ['bogus', 'a.example.com']]) {
-      const result = spawnSync('bash', [script, ...args], {
-        encoding: 'utf8',
-        env: { PATH: `${stubs}:${process.env.PATH}` },
-      });
-      assert.equal(result.status, 1, `args: ${JSON.stringify(args)}`);
-      assert.match(result.stdout, /ERROR: firewall mode '\w*' is not web or strict/);
-      assert.equal(existsSync(log), false, `args: ${JSON.stringify(args)} called a firewall tool`);
-    }
+    const env = { PATH: `${dir}:${process.env.PATH}` };
+    const resolved = execFileSync('bash', ['-c', 'command -v "$@"', 'bash', ...NETWORK_TOOLS], {
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(
+      resolved,
+      NETWORK_TOOLS.map((tool) => `${join(dir, tool)}\n`).join(''),
+      'refusing to run: a network tool does not resolve to its stub',
+    );
+    const result = spawnSync('bash', [firewallScript, ...args], { encoding: 'utf8', env });
+    const calls = existsSync(log) ? readFileSync(log, 'utf8').trimEnd().split('\n') : [];
+    return { status: result.status, stdout: result.stdout, calls };
   } finally {
-    rmSync(stubs, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+const hostNetworkRules = [
+  'iptables -A INPUT -s 172.17.0.0/24 -j ACCEPT',
+  'iptables -A OUTPUT -d 172.17.0.0/24 -j ACCEPT',
+];
+const flushAndLocalRules = [
+  'iptables -F',
+  'iptables -X',
+  'iptables -t nat -F',
+  'iptables -t nat -X',
+  'iptables -t mangle -F',
+  'iptables -t mangle -X',
+  'iptables -A OUTPUT -p udp --dport 53 -j ACCEPT',
+  'iptables -A INPUT -p udp --sport 53 -j ACCEPT',
+  'iptables -A OUTPUT -p tcp --dport 22 -j ACCEPT',
+  'iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT',
+  'iptables -A INPUT -i lo -j ACCEPT',
+  'iptables -A OUTPUT -o lo -j ACCEPT',
+];
+const dropAndEstablishedRules = [
+  'iptables -P INPUT DROP',
+  'iptables -P FORWARD DROP',
+  'iptables -P OUTPUT DROP',
+  'iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT',
+  'iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT',
+];
+const iptablesRules = (calls: string[]) => calls.filter((call) => call.startsWith('iptables '));
+
+test('the firewall rejects an unknown mode before any network tool runs', () => {
+  for (const args of [[], [''], ['on'], ['WEB'], ['off'], ['bogus', 'a.example.com']]) {
+    const result = runFirewall(args);
+    assert.equal(result.status, 1, `args: ${JSON.stringify(args)}`);
+    assert.match(result.stdout, /ERROR: firewall mode '\w*' is not web or strict/);
+    assert.deepEqual(result.calls, [], `args: ${JSON.stringify(args)} called a network tool`);
   }
 });
 
-test('the web mode needs no region and rejects each private range after the host-network accepts', () => {
-  assert.match(firewall, /if \[ "\$MODE" = strict \]; then\n    REGION=\$\(jq /, 'region lookup is for strict mode only');
-  assert.match(firewall, /if \[ "\$MODE" = strict \]; then\n    # Create ipset/, 'the allowlist is for strict mode only');
-  const accept = firewall.indexOf('iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT');
-  const rejects = /for cidr in ([\d./ ]+); do\n\s+iptables -A OUTPUT -d "\$cidr" -j REJECT/.exec(firewall);
-  assert.ok(rejects, 'private ranges are rejected in a loop');
-  assert.deepEqual(rejects[1].split(' '), [
-    '10.0.0.0/8',
-    '172.16.0.0/12',
-    '192.168.0.0/16',
-    '100.64.0.0/10',
-    '169.254.0.0/16',
+test('strict mode checks the region and that its hosts resolve before it changes a rule', () => {
+  const badRegion = runFirewall(['strict'], { jq: 'echo not-a-region' });
+  assert.equal(badRegion.status, 1);
+  assert.match(badRegion.stdout, /'not-a-region' in \S+ is not an AWS region name/);
+  assert.deepEqual(badRegion.calls, [`jq -er .pluginConfigs["phi-guard@phi-guard"].options.aws_region ${SETTINGS}`]);
+
+  const unresolved = runFirewall(['strict'], { dig: '' });
+  assert.equal(unresolved.status, 1);
+  assert.match(unresolved.stdout, /bedrock-runtime\.us-east-2\.amazonaws\.com does not resolve/);
+  assert.deepEqual(
+    unresolved.calls.filter((call) => /^(iptables|ipset|ip6tables) /.test(call)),
+    [],
+  );
+});
+
+test('web mode accepts the host network, then rejects each private range, then drops, then accepts the public internet', () => {
+  const { status, stdout, calls } = runFirewall(['web']);
+  assert.equal(status, 0, stdout);
+  assert.deepEqual(iptablesRules(calls), [
+    ...flushAndLocalRules,
+    ...hostNetworkRules,
+    ...['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '169.254.0.0/16'].map(
+      (cidr) => `iptables -A OUTPUT -d ${cidr} -j REJECT --reject-with icmp-admin-prohibited`,
+    ),
+    ...dropAndEstablishedRules,
+    'iptables -A OUTPUT -j ACCEPT',
   ]);
-  const rejectAt = firewall.indexOf(rejects[0]);
-  assert.ok(accept !== -1 && accept < rejectAt, 'host-network accept must come before the private rejects');
-  assert.ok(rejectAt < firewall.indexOf('iptables -P OUTPUT DROP'), 'private rejects come before the DROP policy');
+  assert.deepEqual(
+    calls.filter((call) => /^(ipset|jq|dig) /.test(call)),
+    ['ipset destroy allowed-domains'],
+    'web mode has no allowlist, region or host lookups',
+  );
+  assert.match(stdout, /Firewall verification passed - unable to reach 169\.254\.169\.254 as expected/);
+});
+
+test('strict mode builds the allowlist first, then accepts only that set and rejects the rest', () => {
+  const { status, stdout, calls } = runFirewall(['strict']);
+  assert.equal(status, 0, stdout);
+  assert.deepEqual(iptablesRules(calls), [
+    ...flushAndLocalRules,
+    ...hostNetworkRules,
+    ...dropAndEstablishedRules,
+    'iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT',
+    'iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited',
+  ]);
+
+  const ipsetCalls = calls.filter((call) => call.startsWith('ipset '));
+  assert.deepEqual(ipsetCalls.slice(0, 2), ['ipset destroy allowed-domains', 'ipset create allowed-domains hash:net']);
+  assert.ok(ipsetCalls.slice(2).every((call) => call.startsWith('ipset add allowed-domains ')));
   assert.ok(
-    firewall.indexOf('iptables -A OUTPUT -j ACCEPT') > firewall.indexOf('iptables -P OUTPUT DROP'),
-    'the public accept comes last',
+    calls.lastIndexOf(ipsetCalls.at(-1)!) <
+      calls.indexOf('iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT'),
+    'the allowlist is complete before the rule that uses it',
   );
-  assert.match(
-    firewall,
-    /if \[ "\$MODE" = web \]; then\n\s+#[^\n]*\n\s+iptables -A OUTPUT -j ACCEPT\nelse/,
-    'the public accept is web-only',
-  );
+
+  const resolved = calls.flatMap((call) => /^dig \+noall \+answer A (\S+)$/.exec(call)?.[1] ?? []);
+  for (const host of [
+    'api.anthropic.com',
+    'claude.ai',
+    'claude.com',
+    'platform.claude.com',
+    'api.openai.com',
+    'chatgpt.com',
+    'auth.openai.com',
+    'bedrock-runtime.us-east-2.amazonaws.com',
+    'sts.us-east-2.amazonaws.com',
+  ]) {
+    assert.ok(resolved.includes(host), host);
+  }
+  assert.match(stdout, /Firewall verification passed - unable to reach https:\/\/example\.com as expected/);
 });
 
 test('the host ~/.aws and ~/.npmrc are bind-mounted read-only, so the agent cannot plant a credential_process', () => {
@@ -346,8 +412,9 @@ test('initializeCommand creates the mount sources and leaves an existing ~/.npmr
 
 // Sources the firewall script, which only defines functions then, and calls one.
 const callFirewallFunction = (fn: string, arg: string) => {
-  const script = fileURLToPath(new URL('.devcontainer/init-firewall.sh', root));
-  const result = spawnSync('bash', ['-c', 'source "$1" && shift && "$@"', 'bash', script, fn, arg], { encoding: 'utf8' });
+  const result = spawnSync('bash', ['-c', 'source "$1" && shift && "$@"', 'bash', firewallScript, fn, arg], {
+    encoding: 'utf8',
+  });
   assert.equal(result.status, 0, result.stderr);
   return { hosts: result.stdout.split('\n').filter(Boolean), warnings: result.stderr };
 };
@@ -412,7 +479,10 @@ test('the firewall derives only CodeArtifact registry hosts from the npmrc and n
       warnings: '',
     });
   });
-  assert.deepEqual(callFirewallFunction('codeartifact_hosts_from_npmrc', '/nonexistent/.npmrc'), { hosts: [], warnings: '' });
+  assert.deepEqual(callFirewallFunction('codeartifact_hosts_from_npmrc', '/nonexistent/.npmrc'), {
+    hosts: [],
+    warnings: '',
+  });
 });
 
 test('the firewall accepts only plain hostnames from PHI_GUARD_EXTRA_HOSTS', () => {

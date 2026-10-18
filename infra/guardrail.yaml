@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  phi-guard: Bedrock guardrail used by Claude Code hooks to block PHI in prompts
+  phi-guard: Bedrock guardrail used by the Claude Code and Codex hooks to block PHI in prompts
   and mask it in command output before it reaches a model without a BAA.
 
 # Deploy into the BAA-covered account. Every scan sends the suspect text to Bedrock.

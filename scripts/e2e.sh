@@ -247,7 +247,7 @@ scenario_c1() {
   events model-text claude "$TMP/c1.out" >"$TMP/c1.model"
   local tokens name=''
   tokens=$(events tokens claude "$TMP/c1.out")
-  if [[ $(<"$TMP/c1.answer") =~ could\ not\ scan\ this\ prompt\ \(([A-Za-z]+)\) ]]; then name=${BASH_REMATCH[1]}; fi
+  if [[ $(<"$TMP/c1.answer") =~ could\ not\ scan\ this\ prompt\ \(([A-Za-z0-9_]+)\) ]]; then name=${BASH_REMATCH[1]}; fi
   EVIDENCE="errorName=${name:-none}, tokens=$tokens"
   check 'no phi-guard block reason in the output' test -n "$name"
   check 'errorName is MissingGuardrailConfig, so pluginConfigs did not reach the hook' test "$name" != MissingGuardrailConfig
@@ -358,7 +358,7 @@ scenario_lx1() {
   local tokens messages reason=none
   tokens=$(events tokens codex "$TMP/lx1.out")
   messages=$(grep -c '"agent_message"' "$TMP/lx1.out" || true)
-  if [[ $(cat "$TMP/lx1.out" "$TMP/lx1.err") =~ (blocked\ this\ prompt:\ possible\ [A-Za-z_]+(,\ [A-Za-z_]+)*|could\ not\ scan\ this\ prompt\ \([A-Za-z]+\)) ]]; then
+  if [[ $(cat "$TMP/lx1.out" "$TMP/lx1.err") =~ (blocked\ this\ prompt:\ possible\ [A-Za-z_]+(,\ [A-Za-z_]+)*|could\ not\ scan\ this\ prompt\ \([A-Za-z0-9_]+\)) ]]; then
     reason=${BASH_REMATCH[1]/#could not scan this prompt /could not scan }
   fi
   EVIDENCE="tokens=$tokens, agent_message events=$messages, reason=$reason"
@@ -419,9 +419,7 @@ started=$SECONDS
 [ -f "$ROOT/dist/codex-runner.mjs" ] || { echo "dist/ is missing, run pnpm build" >&2; exit 1; }
 
 # The canary hooks are test-only: built from the pure cores into the temp dir, never into dist/.
-"$ROOT/node_modules/.bin/esbuild" "$HELPERS/canary-claude.ts" "$HELPERS/canary-codex.ts" \
-  --bundle --platform=node --format=esm --target=node20 --out-extension:.js=.mjs \
-  --outdir="$TMP" --log-level=warning
+"$ROOT/scripts/build.sh" "$TMP" "$HELPERS"/canary-*.ts
 
 if command -v claude >/dev/null; then
   echo "claude $(claude --version)"

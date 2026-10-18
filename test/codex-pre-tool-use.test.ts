@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { parseWrapped, wrapCommand, type CodexPaths } from '../src/hooks/codex-command.ts';
 import { rewriteCommand } from '../src/hooks/codex-pre-tool-use.ts';
 
 const runnerPath = new URL('../dist/codex-runner.mjs', import.meta.url).pathname;
 const uid = process.getuid!();
 const scratch = mkdtempSync(join(tmpdir(), 'phi-guard-pre-'));
+after(() => rmSync(scratch, { recursive: true, force: true }));
 
 function pathsIn(name: string): CodexPaths {
   return { execPath: process.execPath, runnerPath, captureDir: join(scratch, name), uid };
@@ -33,7 +34,12 @@ test('rewrites the command into the exact PreToolUse allow shape and creates a p
   assert.equal(output!.hookSpecificOutput.permissionDecision, 'allow');
   const command = output!.hookSpecificOutput.updatedInput.command;
   const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-  assert.match(command, new RegExp(`^'${process.execPath}' '${runnerPath}' '${paths.captureDir}/${uuid}\\.out' ${Buffer.from('echo hi').toString('base64')}$`));
+  assert.match(
+    command,
+    new RegExp(
+      `^'${process.execPath}' '${runnerPath}' '${paths.captureDir}/${uuid}\\.out' ${Buffer.from('echo hi').toString('base64')}$`,
+    ),
+  );
   assert.equal(statSync(paths.captureDir).mode & 0o777, 0o700);
 });
 
@@ -68,10 +74,22 @@ const guardEscapes = (paths: CodexPaths): [string, string][] => {
     ['a command that only mentions the runner path', `echo ${quoted(paths.runnerPath)}; cat x`],
     ['an exact runner line followed by more commands', `${exact}; cat secret`],
     ['an exact runner line preceded by more commands', `cat secret; ${exact}`],
-    ['a capture path outside the capture dir', `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '/etc/${randomUUID()}.out' ${b64}`],
-    ['a capture path in a subdirectory', `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '${paths.captureDir}/sub/${randomUUID()}.out' ${b64}`],
-    ['a capture path that is not a generated name', `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '${paths.captureDir}/evil.out' ${b64}`],
-    ['a capture path that traverses out', `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '${paths.captureDir}/../${randomUUID()}.out' ${b64}`],
+    [
+      'a capture path outside the capture dir',
+      `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '/etc/${randomUUID()}.out' ${b64}`,
+    ],
+    [
+      'a capture path in a subdirectory',
+      `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '${paths.captureDir}/sub/${randomUUID()}.out' ${b64}`,
+    ],
+    [
+      'a capture path that is not a generated name',
+      `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '${paths.captureDir}/evil.out' ${b64}`,
+    ],
+    [
+      'a capture path that traverses out',
+      `${quoted(paths.execPath)} ${quoted(paths.runnerPath)} '${paths.captureDir}/../${randomUUID()}.out' ${b64}`,
+    ],
     ['a non-base64 argument', exact.replace(/ \S+$/, ' $(cat${IFS}secret)')],
     ['a different node binary', exact.replace(quoted(paths.execPath), "'/usr/bin/evil-node'")],
   ];
@@ -86,7 +104,7 @@ for (const [name, command] of guardEscapes(pathsIn('guard'))) {
   });
 }
 
-test('rejects input without a command', () => {
+test('rejects input without a command, and an empty one the runner could not run', () => {
   for (const input of [null, {}, { tool_input: {} }, { tool_input: { command: 7 } }, inputFor('')]) {
     assert.throws(() => rewriteCommand(input, pathsIn('invalid')), { name: 'InvalidHookInput' });
   }

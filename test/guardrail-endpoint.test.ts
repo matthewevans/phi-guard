@@ -15,7 +15,10 @@ let dir: string;
 before(() => {
   dir = mkdtempSync(join(tmpdir(), 'phi-guard-endpoint-'));
   const configFile = join(dir, 'config');
-  writeFileSync(configFile, `[profile redirected]\nregion = ${REGION}\nendpoint_url = ${REDIRECT}\naws_access_key_id = AKIAFAKEFAKEFAKEFAKE\naws_secret_access_key = fake-secret\n`);
+  writeFileSync(
+    configFile,
+    `[profile redirected]\nregion = ${REGION}\nendpoint_url = ${REDIRECT}\naws_access_key_id = AKIAFAKEFAKEFAKEFAKE\naws_secret_access_key = fake-secret\n`,
+  );
   Object.assign(process.env, {
     AWS_ENDPOINT_URL: REDIRECT,
     AWS_ENDPOINT_URL_BEDROCK_RUNTIME: REDIRECT,

@@ -2,7 +2,16 @@
 // throwaway git repo. The live path (real Docker, real devcontainer CLI) is checked by hand.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -11,14 +20,14 @@ import { fileURLToPath } from 'node:url';
 const nophi = fileURLToPath(new URL('../bin/nophi', import.meta.url));
 const payload = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 const config = join(payload, '.devcontainer/devcontainer.json');
-const HEALTH_SCRIPT = 'printf %s "$1" | node /opt/phi-guard/dist/codex-prompt.mjs';
+const HEALTH_SCRIPT = 'printf %s "$1" | node /opt/phi-guard/dist/codex-prompt.mjs | jq -r .reason';
 const HEALTH_INPUT = '{"prompt":"nophi health check"}';
 
 // Each stub appends "name [arg] [arg]" to $STUB_LOG, so an empty argument is visible.
 // The STUB_* variables steer the answers: STUB_DOCKER_DOWN fails `docker info`, STUB_IDS is
 // what `docker ps` prints, STUB_UP_STATUS is the exit of `devcontainer up`, STUB_HEALTH_OUT and
-// STUB_HEALTH_STATUS answer the health check (the exec that runs sh), STUB_AGENT_STATUS the
-// other execs.
+// STUB_HEALTH_STATUS answer the health check (the exec that runs bash; the real script prints the
+// block reason or nothing), STUB_AGENT_STATUS the other execs.
 const LOG_ARGV = '{ printf %s "${0##*/}"; for a in "$@"; do printf " [%s]" "$a"; done; echo; } >> "$STUB_LOG"\n';
 const STUBS = {
   docker:
@@ -32,7 +41,7 @@ const STUBS = {
     `#!/bin/sh\n${LOG_ARGV}` +
     'if [ "$1" = up ]; then exit "${STUB_UP_STATUS:-0}"; fi\n' +
     'for a in "$@"; do\n' +
-    '  if [ "$a" = sh ]; then printf %s "$STUB_HEALTH_OUT"; exit "${STUB_HEALTH_STATUS:-0}"; fi\n' +
+    '  if [ "$a" = bash ]; then printf %s "$STUB_HEALTH_OUT"; exit "${STUB_HEALTH_STATUS:-0}"; fi\n' +
     'done\n' +
     'exit "${STUB_AGENT_STATUS:-0}"\n',
 };
@@ -43,7 +52,13 @@ type Launch = { status: number | null; stdout: string; stderr: string; calls: st
 // `cwd` is relative to the repo root.
 const launch = (
   args: string[],
-  { env = {}, setup, cwd = '.', repo = true, link = false }: {
+  {
+    env = {},
+    setup,
+    cwd = '.',
+    repo = true,
+    link = false,
+  }: {
     env?: Record<string, string>;
     setup?: (repo: string) => void;
     cwd?: string;
@@ -149,7 +164,7 @@ test('claude runs up, the health check and the agent in order, passing its args 
   assert.deepEqual(result.calls, [
     'docker [info]',
     `devcontainer [up] ${dc(result.repo)}`,
-    `devcontainer [exec] ${dc(result.repo)} [sh] [-c] [${HEALTH_SCRIPT}] [_] [${HEALTH_INPUT}]`,
+    `devcontainer [exec] ${dc(result.repo)} [bash] [-o] [pipefail] [-c] [${HEALTH_SCRIPT}] [_] [${HEALTH_INPUT}]`,
     `devcontainer [exec] ${dc(result.repo)} [--remote-env] [CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1] [claude] ` +
       '[--model] [sonnet] [-p] [hi there]',
   ]);
@@ -171,7 +186,7 @@ test('the payload path is normalised when nophi runs through a symlink', () => {
 test('a health check that reports a block exits 1 with the reason and the good-morning hint, and runs no agent', () => {
   const reason = 'phi-guard could not scan this prompt (CredentialsProviderError), so it was blocked.';
   const result = launch(['claude'], {
-    env: { STUB_HEALTH_OUT: JSON.stringify({ decision: 'block', reason }) },
+    env: { STUB_HEALTH_OUT: reason },
   });
   assert.equal(result.status, 1);
   assert.ok(result.stderr.includes(reason));
@@ -190,7 +205,10 @@ test('a health check that exits non-zero with no output also fails', () => {
 test('shell and codex login skip the health check', () => {
   const shell = launch(['shell']);
   assert.equal(shell.status, 0, shell.stderr);
-  assert.equal(shell.calls.at(-1), `devcontainer [exec] ${dc(shell.repo)} [--remote-env] [CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1] [zsh]`);
+  assert.equal(
+    shell.calls.at(-1),
+    `devcontainer [exec] ${dc(shell.repo)} [--remote-env] [CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1] [zsh]`,
+  );
   assert.equal(shell.calls.length, 3);
 
   const login = launch(['codex', 'login', '--device-auth'], { env: { STUB_HEALTH_STATUS: '3' } });
@@ -225,6 +243,12 @@ test('down removes the labelled containers and starts nothing', () => {
       `[label=devcontainer.config_file=${config}]`,
     'docker [rm] [-f] [abc123] [def456]',
   ]);
+});
+
+test('a failed start still reports the log path when removing the left-behind container fails', () => {
+  const result = launch(['claude'], { env: { STUB_UP_STATUS: '1', STUB_IDS: 'abc123', STUB_RM_STATUS: '1' } });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /could not start the sandbox; full log: /);
 });
 
 test('down exits non-zero when docker rm fails', () => {

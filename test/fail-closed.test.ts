@@ -2,7 +2,7 @@
 // would, to prove every failure path blocks or withholds rather than passing through.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { spawnHook } from './hook-process.ts';
+import { spawnHangingHook, spawnHook } from './hook-process.ts';
 
 // Obviously fake options, with no credentials anywhere, so the scan itself fails.
 const fakeOptions = {
@@ -13,8 +13,8 @@ const fakeOptions = {
   AWS_CONFIG_FILE: '/nonexistent/phi-guard-config',
 };
 
-function runHook(script: string, stdin: string, extraEnv: Record<string, string> = {}) {
-  const result = spawnHook(script, stdin, extraEnv);
+function runHook(script: string, stdin: string, env: Record<string, string> = {}) {
+  const result = spawnHook(script, stdin, { env });
   assert.equal(result.status, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
@@ -48,6 +48,15 @@ test('bash hook withholds output on unreadable input', () => {
   assert.match(output.hookSpecificOutput.updatedToolOutput.stdout, /withheld/);
 });
 
+test('bash hook withholds output when tool_response lacks stdout or stderr strings', () => {
+  const responses = [{}, { output: 'Jane Roe' }, { stdout: 'Jane Roe' }, { stdout: 'Jane Roe', stderr: null }];
+  for (const response of responses) {
+    const input = JSON.stringify({ tool_name: 'Bash', tool_response: response });
+    const output = runHook('bash-output.mjs', input, fakeOptions);
+    assert.equal(output.hookSpecificOutput.updatedToolOutput.stdout, withheldFor('InvalidHookInput').stdout);
+  }
+});
+
 test('prompt hook blocks when the scan itself fails', () => {
   const started = Date.now();
   const output = runHook('prompt.mjs', JSON.stringify({ prompt: 'hello' }), fakeOptions);
@@ -66,4 +75,17 @@ test('bash hook withholds output when the scan itself fails', () => {
   assert.equal(updated.stderr, '');
   assert.equal(updated.extra, 1);
   assert.ok(Date.now() - started < 15_000, 'must finish well inside the 20s hook timeout');
+});
+
+test('both hooks enforce their own deadline when stdin never closes', { timeout: 25_000 }, async () => {
+  const [prompt, bash] = await Promise.all([spawnHangingHook('prompt.mjs'), spawnHangingHook('bash-output.mjs')]);
+
+  assert.equal(prompt.status, 0);
+  assert.match(JSON.parse(prompt.stdout).reason, /HookDeadlineExceeded/);
+  assert.equal(bash.status, 0);
+  assert.equal(
+    JSON.parse(bash.stdout).hookSpecificOutput.updatedToolOutput.stdout,
+    '[phi-guard: output withheld, scan failed (HookDeadlineExceeded)]',
+  );
+  for (const { ms } of [prompt, bash]) assert.ok(ms < 18_000, 'must finish inside the 20s hook timeout');
 });

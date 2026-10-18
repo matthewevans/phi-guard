@@ -59,7 +59,9 @@ const selected = Object.fromEntries(
 const toml = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(toml).join(',')}]`;
   if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value).map(([key, item]) => `${key}=${toml(item)}`).join(',')}}`;
+    return `{${Object.entries(value)
+      .map(([key, item]) => `${key}=${toml(item)}`)
+      .join(',')}}`;
   }
   return JSON.stringify(value);
 };

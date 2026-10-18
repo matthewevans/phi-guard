@@ -4,8 +4,10 @@
 // runner's marker, so its capture file is read, deleted and scanned; every failure
 // replaces the result with a withheld notice.
 import { closeSync, constants, fstatSync, openSync, readSync, rmSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
+import { describeFindings, failureName, namedError, withheldNotice } from '../errors.ts';
 import type { Scan } from '../guardrail.ts';
-import { failureName, parseWrapped, verifyCaptureDir, type CodexPaths } from './codex-command.ts';
+import { commandOf, parseWrapped, verifyCaptureDir, type CodexPaths } from './codex-command.ts';
 import type { BlockDecision } from './prompt.ts';
 
 // Bytes shown to the model per command: the first and last halves of the capture,
@@ -14,11 +16,7 @@ const BUDGET_BYTES = 20_000;
 const HALF = (BUDGET_BYTES - 100) / 2;
 
 export function withheld(why: string): BlockDecision {
-  return { decision: 'block', reason: `[phi-guard: output withheld, ${why}]` };
-}
-
-function unsafeCaptureFile(): Error {
-  return Object.assign(new Error('capture file failed verification'), { name: 'UnsafeCaptureFile' });
+  return { decision: 'block', reason: withheldNotice(why) };
 }
 
 function readAt(fd: number, position: number, length: number): Buffer {
@@ -32,17 +30,8 @@ function readAt(fd: number, position: number, length: number): Buffer {
   return buffer.subarray(0, filled);
 }
 
-// Cutting by byte offset can split a multi-byte character; drop the partial one.
-function dropPartialTail(buffer: Buffer): Buffer {
-  for (let i = buffer.length - 1; i >= Math.max(0, buffer.length - 4); i--) {
-    const byte = buffer[i];
-    if ((byte & 0xc0) === 0x80) continue;
-    const length = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
-    return i + length > buffer.length ? buffer.subarray(0, i) : buffer;
-  }
-  return buffer;
-}
-
+// Cutting by byte offset can split a multi-byte character. The head's StringDecoder holds
+// back a trailing partial one, but would turn a leading one into U+FFFD, so the tail drops it.
 function dropPartialHead(buffer: Buffer): Buffer {
   let start = 0;
   while (start < Math.min(3, buffer.length) && (buffer[start] & 0xc0) === 0x80) start++;
@@ -56,14 +45,16 @@ function takeCapture(capturePath: string, { captureDir, uid }: CodexPaths): stri
   const fd = openSync(capturePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid) throw unsafeCaptureFile();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== uid) {
+      throw namedError('UnsafeCaptureFile', 'capture file failed verification');
+    }
 
     if (stat.size <= BUDGET_BYTES) return readAt(fd, 0, stat.size).toString('utf8');
     // Never load the whole file: a command can write gigabytes.
-    const head = dropPartialTail(readAt(fd, 0, HALF));
+    const head = new StringDecoder('utf8').write(readAt(fd, 0, HALF));
     const tail = dropPartialHead(readAt(fd, stat.size - HALF, HALF));
-    const omitted = stat.size - head.length - tail.length;
-    return `${head.toString('utf8')}\n[phi-guard: ${omitted} bytes omitted]\n${tail.toString('utf8')}`;
+    const omitted = stat.size - Buffer.byteLength(head) - tail.length;
+    return `${head}\n[phi-guard: ${omitted} bytes omitted]\n${tail.toString('utf8')}`;
   } finally {
     closeSync(fd);
     rmSync(capturePath, { force: true });
@@ -85,20 +76,15 @@ export async function maskCodexOutput(
   scan: Scan,
   paths: CodexPaths,
 ): Promise<BlockDecision | undefined> {
-  const { tool_input, tool_response } = (input ?? {}) as {
-    tool_input?: { command?: unknown };
-    tool_response?: unknown;
-  };
-  if (typeof tool_input?.command !== 'string') {
-    throw Object.assign(new Error('missing tool_input.command'), { name: 'InvalidHookInput' });
-  }
+  const command = commandOf(input);
+  const { tool_response } = input as { tool_response?: unknown };
 
-  const capturePath = parseWrapped(paths, tool_input.command);
+  const capturePath = parseWrapped(paths, command);
   let text: string;
   if (capturePath === undefined) {
     // Not wrapped, so PreToolUse failed open and this is the command's real output.
     if (typeof tool_response !== 'string') {
-      throw Object.assign(new Error('tool_response is not a string'), { name: 'InvalidHookInput' });
+      throw namedError('InvalidHookInput', 'tool_response is not a string');
     }
     if (tool_response === '') return undefined;
     text = tool_response;
@@ -115,6 +101,8 @@ export async function maskCodexOutput(
     // The wrapped result is only the marker, so clean output must still replace it.
     return capturePath === undefined ? undefined : { decision: 'block', reason: result.text };
   }
-  const found = result.findings.join(', ') || 'sensitive data';
-  return { decision: 'block', reason: `${result.text}\n\n[phi-guard masked ${found} in this output.]` };
+  return {
+    decision: 'block',
+    reason: `${result.text}\n\n[phi-guard masked ${describeFindings(result.findings)} in this output.]`,
+  };
 }

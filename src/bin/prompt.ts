@@ -1,4 +1,5 @@
-import { runPromptHook } from '../hooks/prompt-hook.ts';
+import { exitAfterWrite } from '../hook-io.ts';
+import { runPromptHook } from '../prompt-hook.ts';
 
 const decision = await runPromptHook('CLAUDE_PLUGIN_OPTION_');
-if (decision) process.stdout.write(JSON.stringify(decision));
+exitAfterWrite(process.stdout, decision && JSON.stringify(decision), 0);
