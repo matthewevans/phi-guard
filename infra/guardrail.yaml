@@ -96,10 +96,10 @@ Resources:
 
 Outputs:
   GuardrailId:
-    Description: Set as the plugin's guardrail_id option (Codex env var PHI_GUARD_GUARDRAIL_ID).
+    Description: Export as PHI_GUARD_GUARDRAIL_ID on the host before building the sandbox image.
     Value: !GetAtt Guardrail.GuardrailId
   GuardrailVersion:
-    Description: Set as the plugin's guardrail_version option (Codex env var PHI_GUARD_GUARDRAIL_VERSION).
+    Description: Export as PHI_GUARD_GUARDRAIL_VERSION on the host before building the sandbox image.
     Value: !GetAtt GuardrailVersion.Version
   ApplyGuardrailPolicyArn:
     Value: !Ref ApplyGuardrailPolicy

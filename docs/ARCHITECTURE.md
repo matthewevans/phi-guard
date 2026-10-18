@@ -268,7 +268,7 @@ Container:
 | Residual | Effect and breadth |
 |---|---|
 | AWS endpoint IPs rotate (strict mode) | The strict firewall resolves DNS once, when it starts. After a rotation the Bedrock and STS calls fail, so the hooks fail closed (prompts blocked, output withheld) until the container is restarted. A stale allowlist entry can also point at an address another party now uses (inferred, not verified) |
-| Strict mode needs a real region | It reads `aws_region` from the managed Claude settings and exits before changing any rule if the value is a placeholder or does not resolve. Until Part 2 sets a real region a strict container runs without a firewall. Web mode does not read the region. The hooks still fail closed: with the placeholder region the SDK rejects the region, so prompts are blocked and output is withheld, reported under the generic error name `Error` |
+| Strict mode needs a real region | It reads `aws_region` from the managed Claude settings, which the image build writes from `PHI_GUARD_AWS_REGION` (the build fails when it is empty). The script exits before changing any rule if the value is not a region name or does not resolve, and then the strict container runs without a firewall. Web mode does not read the region. A wrong but well-formed region makes every scan fail, so the hooks fail closed |
 | The firewall script fails midway | It flushes the rules, then (in strict mode) resolves hosts, then switches the default policies to DROP. A failure in between leaves egress open until a later run succeeds |
 | IPv4 only | The firewall writes no IPv6 rules. If the Docker network gives the container IPv6, all IPv6 egress is unfiltered. Docker's default bridge has no IPv6 |
 | Reference firewall rules that stay | Outbound DNS (UDP 53) to any resolver, outbound SSH (TCP 22) to any host, and the host's /24 network are allowed, as in Anthropic's reference. In web mode these accepts come before the private-range rejects, so DNS and SSH also reach private addresses, and the host's /24 stays reachable although it usually sits inside a rejected range |
@@ -402,7 +402,7 @@ invalid one.
   rejects `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and
   `169.254.0.0/16` (the last holds the cloud metadata service), then accepts all other
   outbound traffic. It makes no DNS lookups for an allowlist and reads no region, so
-  it works before Part 2. Its self-test expects `https://api.github.com/zen` to answer
+  it needs no guardrail configuration. Its self-test expects `https://api.github.com/zen` to answer
   and `http://169.254.169.254/` to fail.
 - **Strict firewall allowlist.** GitHub's published ranges, `registry.npmjs.org`, the
   Anthropic hosts (`api.anthropic.com`, `claude.ai`, `claude.com`,
@@ -421,10 +421,16 @@ invalid one.
 - **Refreshing after IP rotation (strict mode).** Restart the container.
   `postStartCommand` re-runs the script in a fresh network namespace. Re-running it
   in place is not supported.
-- **Placeholders.** `REPLACE_IN_PART_2_*` values appear in
-  `.devcontainer/Dockerfile` (the `PHI_GUARD_*` variables) and
-  `.devcontainer/claude-code/phi-guard.json`. `test/devcontainer.test.ts` checks that
-  the two agree. Until they are replaced every scan fails and the hooks fail closed.
+- **Guardrail values.** The public repo commits none. `devcontainer.json` passes
+  `PHI_GUARD_GUARDRAIL_ID`, `PHI_GUARD_GUARDRAIL_VERSION`, `PHI_GUARD_AWS_REGION` and
+  `PHI_GUARD_AWS_PROFILE` (default `phi-guard`) from the host environment as build
+  args. At the end of the Dockerfile a `RUN` fails the build when one of the first
+  three is empty (it names the variables, never the values), a second `RUN` writes the
+  Claude `pluginConfigs` options into the root-owned managed settings with `jq`, and
+  `ENV` lines give Codex the same values. Every way of building the image passes through
+  that check, so no image ships with empty options. A container keeps the image it was
+  created from, so changed values need `nophi --rebuild`. `test/devcontainer.test.ts`
+  checks that the option keys, build args and `ENV` lines use the same names.
 - **Shell.** `SHELL=/bin/zsh` and `ZDOTDIR=/etc/zsh` serve interactive terminals.
   Because zsh looks for its startup files in root-owned `/etc/zsh`, users'
   `~/.zshrc` and other dotfiles are ignored and zsh keeps no history (`HISTFILE` is
@@ -527,5 +533,5 @@ Also open: the launcher's health-check pass path (that `devcontainer exec` print
 nothing on stdout when the guardrail answers), which is verified only against stubs
 because live runs exercised only the block path; a Codex PostToolUse run that masks a
 fake member ID against the real guardrail, Codex managed requirements behavior inside
-the running container (including the empty MCP allowlist against a real server), and the real guardrail
-values in the placeholders.
+the running container (including the empty MCP allowlist against a real server), and the
+guardrail values exported on the host before the image is built.

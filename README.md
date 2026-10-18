@@ -48,16 +48,19 @@ sandbox must allow writes to `/tmp` (workspace-write or danger-full-access). Wit
 Open the repo in the dev container (`.devcontainer/`). It installs both CLIs and
 the plugin, and enforces the hooks through managed settings for Claude Code and
 `requirements.toml` for Codex. Codex runs with `danger-full-access` because the
-container is its boundary. The `REPLACE_IN_PART_2_*` placeholders in
-`.devcontainer/Dockerfile` and `.devcontainer/claude-code/phi-guard.json` need real
-guardrail values before the hooks can scan. The `strict` firewall mode will not start
-until a real region is set there.
+container is its boundary. The guardrail values are not in the repo. Export
+`PHI_GUARD_GUARDRAIL_ID`, `PHI_GUARD_GUARDRAIL_VERSION` and `PHI_GUARD_AWS_REGION` in
+the host environment before the image is built, which fails with the names of any that
+are empty. `PHI_GUARD_AWS_PROFILE` is optional: unset means `phi-guard`, and set but empty means the
+default AWS credential chain. A container
+keeps the image it was created from, so after changing a value rebuild it
+(`nophi --rebuild`).
 
 The container mounts your host `~/.aws` and `~/.npmrc` read-only. The hooks call
-Bedrock with the `phi-guard` profile, so add a `[profile phi-guard]` to your
-`~/.aws/config`: an SSO profile whose role allows `bedrock:ApplyGuardrail` on the
-guardrail. Refresh credentials on the host (`aws sso login`, CodeArtifact login). An
-expired session blocks prompts until you do.
+Bedrock with the AWS profile above (`phi-guard` unless you export another), so add a
+`[profile phi-guard]` to your `~/.aws/config`: an SSO profile whose role allows
+`bedrock:ApplyGuardrail` on the guardrail. Refresh credentials on the host
+(`aws sso login`, CodeArtifact login). An expired session blocks prompts until you do.
 
 Sign in to Claude Code and Codex inside the container. Both logins live in the Docker
 volumes `phi-guard-claude-config` and `phi-guard-codex-config`, which every repo's
@@ -103,7 +106,7 @@ nophi codex login --device-auth
 
 Flags go before the subcommand and everything after it passes to the agent.
 `--rebuild` recreates the container, which you need after changing
-`PHI_GUARD_FIREWALL`. The sandbox mounts your working tree, so edits land in your
+`PHI_GUARD_FIREWALL` or a guardrail variable. The sandbox mounts your working tree, so edits land in your
 checkout. Git worktrees do not work inside it, because a worktree's `.git` file
 points at a host path.
 
@@ -143,6 +146,35 @@ Without a profile the default AWS credential chain applies. The credentials need
 only `bedrock:ApplyGuardrail` on the guardrail (`infra/guardrail.yaml` creates a
 managed policy for it).
 
+## Testing on a work machine
+
+Your host `claude` and `codex` logins stay as they are. `pnpm e2e` runs with isolation
+flags (`--setting-sources project`, `--no-session-persistence`, `--ephemeral`,
+`--ignore-user-config`) and edits nothing under `~/.claude` or `~/.codex`. The
+sandbox signs in on its own login volumes, with any account.
+
+1. Clone this repo, run `pnpm install`, and `brew install devcontainer`.
+2. Deploy `infra/guardrail.yaml` or reuse an existing guardrail, and refresh AWS on the
+   host (`good-morning`).
+3. Export the four `PHI_GUARD_*` variables from the [Configuration](#configuration)
+   table. The profile defaults to `phi-guard`. As an alternative to adding a
+   `[profile phi-guard]` entry, set `PHI_GUARD_AWS_PROFILE` to the work profile that can
+   call `bedrock:ApplyGuardrail` (set but empty selects the default credential chain).
+4. Run `pnpm e2e`. With the variables exported it adds four scenarios against the real
+   guardrail: LC1 and LX1 (a fake-PII prompt is blocked) and LC2 and LX2 (`cat` of a
+   fake-PII file is masked), two of them cheap-model calls. The isolation flags drop
+   user-level settings. If your company login lives there (an `apiKeyHelper`, an `env`
+   block with `CLAUDE_CODE_USE_BEDROCK`, a custom Codex `model_provider`), the scenarios
+   that call the model fail while LC1 and LX1 still work. If enterprise managed settings
+   set `allowManagedHooksOnly`, the Claude scenarios fail because hooks passed with
+   `--plugin-dir` and `--settings` do not load. LX1 cannot tell a detection from a
+   fail-closed scan error unless Codex surfaces the hook's reason in its output; LX2 is
+   the Codex scenario that proves the real guardrail answered.
+5. In some other repo, run the phi-guard checkout's launcher, for example
+   `~/dev/phi-guard/bin/nophi --rebuild claude`, then `~/dev/phi-guard/bin/nophi codex`. Look for
+   the NO PHI markers, a prompt containing a fake name and email being blocked, and
+   `cat` of a file holding them coming back masked.
+
 ## Development
 
 ```
@@ -158,9 +190,11 @@ Node 22.18 or newer is required.
 
 `pnpm e2e` is manual and not part of `pnpm check`. It runs the hooks against the
 installed `claude` and `codex` CLIs, with about five cheap-model calls in total.
-There is no AWS access in Part 1, so the expected outcomes are the fail-closed
+Its main scenarios use a bogus guardrail, so the expected outcomes are the fail-closed
 ones: prompts blocked, outputs withheld, and the masking paths proven with a
-test-only fake scanner. `scripts/e2e.sh` lists each scenario and its expected result.
+test-only fake scanner. With the guardrail variables exported (see
+[Testing on a work machine](#testing-on-a-work-machine)) four more scenarios run
+against the real guardrail. `scripts/e2e.sh` lists each scenario and its expected result.
 
 ## Cost
 

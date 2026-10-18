@@ -41,12 +41,17 @@ const claudePlugin = readJson('.claude-plugin/plugin.json');
 const marketplace = readJson('.claude-plugin/marketplace.json');
 const pluginId = `${claudePlugin.name}@${marketplace.name}`;
 const claudeSettings = readJson('.devcontainer/claude-code/phi-guard.json');
-const options: Record<string, string> = claudeSettings.pluginConfigs[pluginId].options;
 
 const requirements = parseToml(read('.devcontainer/codex/requirements.toml'));
 const managedConfig = parseToml(read('.devcontainer/codex/managed_config.toml'));
 const devcontainer = JSON.parse(read('.devcontainer/devcontainer.json').replace(/^\/\/.*$/gm, ''));
 const dockerfile = read('.devcontainer/Dockerfile');
+// The image build adds the pluginConfigs options to the managed settings: one jq --arg
+// per option, whose value is the build arg (and Codex env var) of the same name.
+const optionArgs = [...dockerfile.matchAll(/--arg (\w+) "\$(PHI_GUARD_\w+)"/g)].map((match) => ({
+  key: match[1],
+  variable: match[2],
+}));
 const firewall = read('.devcontainer/init-firewall.sh');
 
 const hookTables = (event: string) =>
@@ -57,7 +62,9 @@ test('Claude managed settings register and force-enable the plugin with matching
     source: { source: 'directory', path: PLUGIN_DIR },
   });
   assert.equal(claudeSettings.enabledPlugins[pluginId], true);
-  assert.deepEqual(Object.keys(options).sort(), Object.keys(claudePlugin.userConfig).sort());
+  assert.equal(claudeSettings.pluginConfigs, undefined, 'the image build adds the options');
+  assert.ok(dockerfile.includes(`'.pluginConfigs["${pluginId}"].options = $ARGS.named'`));
+  assert.deepEqual(optionArgs.map(({ key }) => key).sort(), Object.keys(claudePlugin.userConfig).sort());
 });
 
 test('Claude managed settings lock down bypass, MCP and non-managed hooks', () => {
@@ -77,10 +84,25 @@ test('zsh reads its startup files from a root-owned directory, not the home of u
   assert.match(zdotdir ?? '', /^\/etc\//);
 });
 
-test('required options are placeholders that cannot pass for real values', () => {
-  for (const [key, definition] of Object.entries<{ required?: boolean }>(claudePlugin.userConfig)) {
-    if (definition.required) assert.match(options[key], /^REPLACE_IN_PART_2_\w+$/, key);
-  }
+test('the Dockerfile refuses to build unless every required option has a value', () => {
+  const required = Object.entries<{ required?: boolean }>(claudePlugin.userConfig)
+    .filter(([, definition]) => definition.required)
+    .map(([key]) => `PHI_GUARD_${key.toUpperCase()}`);
+  assert.equal(/^  for name in (.+); do \\$/m.exec(dockerfile)?.[1], required.join(' '));
+  for (const { key, variable } of optionArgs) assert.equal(variable, `PHI_GUARD_${key.toUpperCase()}`);
+});
+
+test('the host environment feeds the build args, and the AWS profile defaults to phi-guard', () => {
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(devcontainer.build.args).filter(([name]) => name.startsWith('PHI_GUARD_'))),
+    Object.fromEntries(
+      optionArgs.map(({ variable }) => [
+        variable,
+        variable === 'PHI_GUARD_AWS_PROFILE' ? '${localEnv:PHI_GUARD_AWS_PROFILE:phi-guard}' : `\${localEnv:${variable}}`,
+      ]),
+    ),
+  );
+  assert.match(dockerfile, /^ARG PHI_GUARD_AWS_PROFILE=phi-guard$/m);
 });
 
 test('the sandbox logins live in fixed named volumes shared by every repo, apart from the host config', () => {
@@ -127,16 +149,13 @@ test('both system rc files source the banner, which stays silent unless the shel
   assert.match(interactive, /^NO PHI IN THIS SANDBOX\.\n.*personal Claude\/ChatGPT subscription\.\nDo not paste, open or query patient data\. .*\n$/);
 });
 
-test('the Dockerfile env repeats the Claude placeholders for Codex', () => {
-  const env = Object.fromEntries(
-    [...dockerfile.matchAll(/^ENV (PHI_GUARD_\w+)=(\S+)$/gm)].map((match) => [match[1], match[2]]),
+test('the Dockerfile env gives Codex the same values as the Claude options, from the same build args', () => {
+  const variables = optionArgs.map(({ variable }) => variable);
+  assert.deepEqual([...dockerfile.matchAll(/^ARG (PHI_GUARD_\w+)(?:=\S+)?$/gm)].map((match) => match[1]), variables);
+  assert.deepEqual(
+    [...dockerfile.matchAll(/^ENV (PHI_GUARD_\w+)=\$(PHI_GUARD_\w+)$/gm)].map((match) => [match[1], match[2]]),
+    variables.map((variable) => [variable, variable]),
   );
-  assert.deepEqual(env, {
-    PHI_GUARD_GUARDRAIL_ID: options.guardrail_id,
-    PHI_GUARD_GUARDRAIL_VERSION: options.guardrail_version,
-    PHI_GUARD_AWS_REGION: options.aws_region,
-    PHI_GUARD_AWS_PROFILE: options.aws_profile,
-  });
 });
 
 test('Codex managed hooks are the shipped hooks file pointed at the installed plugin', () => {

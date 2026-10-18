@@ -19,6 +19,9 @@ class Nophi < Formula
       nophi needs Docker running. The sandbox mounts your ~/.aws read-only and its hooks
       call Bedrock with the "phi-guard" AWS profile, so add a [profile phi-guard] entry
       to ~/.aws/config whose role allows bedrock:ApplyGuardrail.
+
+      Before the first run, export PHI_GUARD_GUARDRAIL_ID, PHI_GUARD_GUARDRAIL_VERSION
+      and PHI_GUARD_AWS_REGION (PHI_GUARD_AWS_PROFILE defaults to phi-guard).
     EOS
   end
 

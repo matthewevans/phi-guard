@@ -47,9 +47,9 @@ COPY hooks /opt/phi-guard/hooks
 COPY dist /opt/phi-guard/dist
 RUN chmod -R u=rwX,go=rX /opt/phi-guard
 
-# Enforced agent config. Replace the REPLACE_IN_PART_2_ placeholders (here and in
-# phi-guard.json) with the real guardrail values. The AWS profile named below comes
-# from the engineer's own ~/.aws/config, which devcontainer.json mounts read-only.
+# Enforced agent config. The guardrail options are added to phi-guard.json at the end of
+# this file. The AWS profile they name comes from the engineer's own ~/.aws/config, which
+# devcontainer.json mounts read-only.
 COPY .devcontainer/claude-code/phi-guard.json /etc/claude-code/managed-settings.d/phi-guard.json
 COPY .devcontainer/codex/requirements.toml .devcontainer/codex/managed_config.toml /etc/codex/
 RUN chmod 0644 /etc/claude-code/managed-settings.d/phi-guard.json /etc/codex/*.toml
@@ -91,11 +91,38 @@ ENV VISUAL=nano
 ENV DISABLE_AUTOUPDATER=1
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
-# phi-guard config for Codex, which has no plugin options. Placeholders until Part 2
-# (the same values as phi-guard.json, which the Claude hooks read).
-ENV PHI_GUARD_GUARDRAIL_ID=REPLACE_IN_PART_2_GuardrailId
-ENV PHI_GUARD_GUARDRAIL_VERSION=REPLACE_IN_PART_2_GuardrailVersion
-ENV PHI_GUARD_AWS_REGION=REPLACE_IN_PART_2_AwsRegion
-ENV PHI_GUARD_AWS_PROFILE=phi-guard
+# The guardrail the hooks call, from the host environment through the build args in
+# devcontainer.json, so this public repo commits no company values. This block comes last
+# so that changing a value rebuilds only these layers. A container keeps the image it was
+# created from: after changing a value, recreate it (nophi --rebuild).
+ARG PHI_GUARD_GUARDRAIL_ID
+ARG PHI_GUARD_GUARDRAIL_VERSION
+ARG PHI_GUARD_AWS_REGION
+ARG PHI_GUARD_AWS_PROFILE=phi-guard
+
+# Every way of building the image passes through this check, so none ships empty options.
+# It prints variable names only, never values.
+RUN missing=''; \
+  for name in PHI_GUARD_GUARDRAIL_ID PHI_GUARD_GUARDRAIL_VERSION PHI_GUARD_AWS_REGION; do \
+    [ -n "$(printenv "$name")" ] || missing="$missing $name"; \
+  done; \
+  [ -z "$missing" ] || { echo "phi-guard: set these on the host before building:$missing (see README, Testing on a work machine)" >&2; exit 1; }
+
+# Claude reads the options from its managed settings. The --arg names are the plugin's
+# userConfig keys. The redirect keeps the file root-owned 0644.
+RUN settings=/etc/claude-code/managed-settings.d/phi-guard.json && \
+  contents=$(jq \
+    --arg guardrail_id "$PHI_GUARD_GUARDRAIL_ID" \
+    --arg guardrail_version "$PHI_GUARD_GUARDRAIL_VERSION" \
+    --arg aws_region "$PHI_GUARD_AWS_REGION" \
+    --arg aws_profile "$PHI_GUARD_AWS_PROFILE" \
+    '.pluginConfigs["phi-guard@phi-guard"].options = $ARGS.named' "$settings") && \
+  printf '%s\n' "$contents" > "$settings"
+
+# Codex has no plugin options, so it reads the same values from the environment.
+ENV PHI_GUARD_GUARDRAIL_ID=$PHI_GUARD_GUARDRAIL_ID
+ENV PHI_GUARD_GUARDRAIL_VERSION=$PHI_GUARD_GUARDRAIL_VERSION
+ENV PHI_GUARD_AWS_REGION=$PHI_GUARD_AWS_REGION
+ENV PHI_GUARD_AWS_PROFILE=$PHI_GUARD_AWS_PROFILE
 
 USER node

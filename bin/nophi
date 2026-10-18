@@ -13,7 +13,7 @@ Usage: nophi [--rebuild] [--i-checked-no-phi] <claude|codex|shell|down> [args...
   shell           open zsh in the sandbox
   down            remove this repo's sandbox container
 
-  --rebuild            recreate the container (after changing PHI_GUARD_FIREWALL)
+  --rebuild            recreate the container (after changing PHI_GUARD_FIREWALL or the guardrail variables)
   --i-checked-no-phi   skip the stop for untracked data-like files (csv, sql, ...)
 EOF
 }
@@ -107,7 +107,7 @@ if [ "$cmd" != shell ] && ! { [ "$cmd" = codex ] && [ "${1:-}" = login ]; }; the
   if [ "$status" != 0 ] || [ -n "$out" ]; then
     reason=$(printf %s "$out" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
     echo "nophi: the guardrail health check failed: ${reason:-${out:-exit status $status}}" >&2
-    die "if this is a credentials error, run good-morning on this machine (profile phi-guard)"
+    die "if this is a credentials error, run good-morning on this machine"
   fi
 fi
 

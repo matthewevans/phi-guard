@@ -105,16 +105,16 @@ if [[ "$MODE" != web && "$MODE" != strict ]]; then
     exit 1
 fi
 
-# 0b. Strict mode validates the region BEFORE touching any rule: a placeholder or typo
-# must not leave the container with a flushed or half-built firewall. Web mode needs no
-# region, so it works before Part 2 fills it in.
+# 0b. Strict mode validates the region BEFORE touching any rule: a typo must not leave
+# the container with a flushed or half-built firewall. The image build writes the region
+# into $SETTINGS and refuses an empty one. Web mode reads no region.
 if [ "$MODE" = strict ]; then
     REGION=$(jq -er '.pluginConfigs["phi-guard@phi-guard"].options.aws_region' "$SETTINGS") || {
         echo "ERROR: cannot read aws_region from $SETTINGS"
         exit 1
     }
     if [[ ! "$REGION" =~ $REGION_RE ]]; then
-        echo "ERROR: aws_region '$REGION' in $SETTINGS is not an AWS region name (still a placeholder?)"
+        echo "ERROR: aws_region '$REGION' in $SETTINGS is not an AWS region name"
         exit 1
     fi
     BEDROCK_HOST="bedrock-runtime.${REGION}.amazonaws.com"

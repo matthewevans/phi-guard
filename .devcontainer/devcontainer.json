@@ -8,7 +8,11 @@
     "dockerfile": "Dockerfile",
     "context": "..",
     "args": {
-      "TZ": "${localEnv:TZ:America/Los_Angeles}"
+      "TZ": "${localEnv:TZ:America/Los_Angeles}",
+      "PHI_GUARD_GUARDRAIL_ID": "${localEnv:PHI_GUARD_GUARDRAIL_ID}",
+      "PHI_GUARD_GUARDRAIL_VERSION": "${localEnv:PHI_GUARD_GUARDRAIL_VERSION}",
+      "PHI_GUARD_AWS_REGION": "${localEnv:PHI_GUARD_AWS_REGION}",
+      "PHI_GUARD_AWS_PROFILE": "${localEnv:PHI_GUARD_AWS_PROFILE:phi-guard}"
     }
   },
   "runArgs": [
