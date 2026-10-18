@@ -85,7 +85,7 @@ in it, so nothing is committed to your repos. It builds the image locally from t
 payload it ships with (this repo's `.devcontainer/`), and Docker caches the build.
 
 ```
-brew tap REPLACE_ORG/phi-guard git@github.com:REPLACE_ORG/phi-guard.git
+brew tap matthewevans/phi-guard https://github.com/matthewevans/phi-guard.git
 brew install nophi
 ```
 
