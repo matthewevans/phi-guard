@@ -5,7 +5,7 @@ use a personal Claude Code or Codex CLI subscription for code-only work. It is a
 plugin for both agents plus a reference dev container.
 
 The sandbox is the boundary: the container runs the agent on the repo you open in
-it (a shallow clone is the intended setup, which the container does not enforce)
+it (`nophi` mounts your working tree, so a fresh or shallow clone is the safest choice)
 with an egress firewall and your host `~/.aws` and `~/.npmrc` mounted read-only. The
 hooks are a safety net for human error. A prompt hook blocks prompts that contain
 PHI, and an output hook masks PHI in shell command output before the model sees it.
@@ -77,6 +77,58 @@ value is fixed when the container is created, and the hooks never read it.
 | `off` | No firewall. What the agent can reach is your responsibility. |
 
 Any other value stops the firewall script before it changes a rule.
+
+## Launcher
+
+`nophi` starts the dev container for whichever git repo you are in and runs an agent
+in it, so nothing is committed to your repos. It builds the image locally from the
+payload it ships with (this repo's `.devcontainer/`), and Docker caches the build.
+
+```
+brew tap REPLACE_ORG/phi-guard git@github.com:REPLACE_ORG/phi-guard.git
+brew install nophi
+```
+
+The formula installs the `devcontainer` CLI. Docker must be running, and `realpath`
+needs macOS 13 or later. Add the `[profile phi-guard]` entry to `~/.aws/config`
+described above, then:
+
+```
+nophi claude [args...]      # Claude Code in the sandbox
+nophi codex [args...]       # Codex in the sandbox
+nophi shell                 # zsh in the sandbox
+nophi down                  # remove this repo's sandbox container
+nophi codex login --device-auth
+```
+
+Flags go before the subcommand and everything after it passes to the agent.
+`--rebuild` recreates the container, which you need after changing
+`PHI_GUARD_FIREWALL`. The sandbox mounts your working tree, so edits land in your
+checkout. Git worktrees do not work inside it, because a worktree's `.git` file
+points at a host path.
+
+Before it starts, `nophi` stops if the repo holds untracked or gitignored files with
+a data-like extension (`csv`, `tsv`, `xls`, `xlsx`, `parquet`, `avro`, `orc`,
+`jsonl`, `ndjson`, `sql`, `dump`, `bak`, `sqlite`, `sqlite3`, `db`), lists up to ten
+of them, and proceeds only when they are moved out or you pass
+`--i-checked-no-phi`. Files inside nested git repos or submodules are not listed, and
+compressed exports (`.gz`, `.zip`) are not matched. After the container starts it
+sends one benign prompt through the Codex prompt hook to prove that the guardrail
+answers. If that fails, the usual
+cause is an expired AWS session: run `good-morning` on this machine. `nophi shell`
+and `nophi codex login` skip that check. Claude's first-run login comes after that check, so
+sign in once AWS works, or run `claude` from `nophi shell`.
+
+In a terminal, `nophi` marks the window while the agent runs and restores it on
+exit: the title reads `NO PHI · <repo>`, the background takes a dark red tint (light
+pink when `COLORFGBG` reports a light background), and iTerm2 also gets a red tab
+and a NO PHI badge. Claude Code keeps that title (`CLAUDE_CODE_DISABLE_TERMINAL_TITLE`).
+Codex sets its own title; the tint, tab colour and its `phi-guard-sandbox` status line
+remain.
+
+`brew upgrade nophi` leaves the previous version's containers running. List them with
+`docker ps --filter label=devcontainer.config_file`, remove them with `docker rm -f`,
+or use Docker Desktop.
 
 ## Configuration
 

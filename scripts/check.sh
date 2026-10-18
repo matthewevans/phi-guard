@@ -15,6 +15,12 @@ if ! diff -rq "$fresh" dist; then
   exit 1
 fi
 
+if command -v shellcheck >/dev/null; then
+  shellcheck bin/nophi
+else
+  echo "warning: shellcheck not found, skipping bin/nophi lint" >&2
+fi
+
 claude plugin validate . --strict
 
 if command -v uvx >/dev/null; then

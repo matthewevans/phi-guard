@@ -435,6 +435,40 @@ invalid one.
   newer, so move the base image and the esbuild target before taking those
   versions.
 
+## Launcher
+
+`bin/nophi` wraps the `devcontainer` CLI around `.devcontainer/devcontainer.json`, which
+stays the single source for mounts, capabilities, the firewall and env. It resolves the
+payload directory through symlinks (a Homebrew install links into `libexec`), so the
+`devcontainer.config_file` label on the container is the normalised absolute path that
+`nophi down` filters on. `Formula/nophi.rb` installs the payload files the Dockerfile
+copies plus `bin/`, so the repo doubles as its own Homebrew tap.
+
+Residuals:
+
+- **Data-file stop.** It matches file extensions only, on untracked and gitignored files.
+  `--i-checked-no-phi` skips it. Tracked files are not checked. Renamed or extensionless
+  exports pass, and so do compressed exports (`.gz`, `.zip`), files inside nested git
+  repos or submodules (`git ls-files` does not list them), and PHI inside a source
+  file. It guards against forgetting, and a determined bypass is out of scope.
+- **Health check.** One benign prompt through the Codex prompt hook shows that the
+  hook's config, credentials and Bedrock are reachable at launch time. It says nothing
+  about later calls, which fail closed in the hooks.
+- **Terminal markers.** The title, tint, tab colour and badge depend on the terminal
+  honouring the escape sequences. Terminals that ignore them show nothing, and an
+  agent or shell that sets its own title or colours can overwrite them. The in-container
+  markers (status line, banner, prompt, hostname) are unaffected.
+- **Fail-open: a container started by other means.** The devcontainer CLI records that
+  `postStartCommand` (the firewall) ran before it runs it. After a failed firewall start
+  that container would skip the firewall on the next `devcontainer up`. `nophi` removes
+  the labelled containers when `up` fails, which closes this for its own launches. An
+  interrupt (Ctrl-C) during `devcontainer up` can still leave a container whose
+  postStart marker is written; `nophi --rebuild` or `nophi down` clears it. A
+  container someone starts with the devcontainer CLI or an editor, and that failed
+  there, can still be reused without a firewall.
+- **Upgrades.** `brew upgrade` leaves containers of the previous version running with
+  their old image and config until they are removed.
+
 ## Detection limits
 
 - The PII filter catches names, addresses, emails, phones, SSNs and similar
@@ -489,7 +523,9 @@ Part 1 had no AWS access. Nothing below is claimed to work.
    before the guardrail lookup, which is likely but unverified for this API. If the
    permission is missing, attach `ApplyGuardrailPolicy` to the permission set.
 
-Also open: a Codex PostToolUse run that masks a fake member ID against the real
-guardrail, Codex managed requirements behavior inside the running container
-(including the empty MCP allowlist against a real server), and the real guardrail
+Also open: the launcher's health-check pass path (that `devcontainer exec` prints
+nothing on stdout when the guardrail answers), which is verified only against stubs
+because live runs exercised only the block path; a Codex PostToolUse run that masks a
+fake member ID against the real guardrail, Codex managed requirements behavior inside
+the running container (including the empty MCP allowlist against a real server), and the real guardrail
 values in the placeholders.

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# nophi: run Claude Code or Codex in the phi-guard NO PHI sandbox for the git repo
+# you are in. The launcher builds the image from the payload next to it (this repo,
+# or the Homebrew libexec copy), so .devcontainer/devcontainer.json stays the single
+# source for mounts, capabilities, the firewall and env.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: nophi [--rebuild] [--i-checked-no-phi] <claude|codex|shell|down> [args...]
+
+  claude, codex   run the agent in the NO PHI sandbox; args pass through to it
+  shell           open zsh in the sandbox
+  down            remove this repo's sandbox container
+
+  --rebuild            recreate the container (after changing PHI_GUARD_FIREWALL)
+  --i-checked-no-phi   skip the stop for untracked data-like files (csv, sql, ...)
+EOF
+}
+
+rebuild=0
+checked=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h | --help) usage; exit 0 ;;
+    --rebuild) rebuild=1 ;;
+    --i-checked-no-phi) checked=1 ;;
+    -*) usage >&2; exit 2 ;;
+    *) break ;;
+  esac
+  shift
+done
+
+cmd=${1:-}
+case $cmd in
+  claude | codex | shell | down) shift ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+die() {
+  echo "nophi: $*" >&2
+  exit 1
+}
+
+here=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
+config=$here/.devcontainer/devcontainer.json
+root=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this inside a git repo"
+dc=(--workspace-folder "$root" --config "$config")
+
+# The devcontainer CLI labels its containers with the resolved workspace and config
+# paths. Prints how many it removed.
+remove_containers() {
+  # shellcheck disable=SC2046 # one word per container id
+  set -- $(docker ps -aq --filter "label=devcontainer.local_folder=$root" --filter "label=devcontainer.config_file=$config")
+  [ $# -eq 0 ] || docker rm -f "$@" >/dev/null || exit
+  echo $#
+}
+
+docker info >/dev/null 2>&1 || die "Docker is not running; start Docker and retry"
+
+if [ "$cmd" = down ]; then
+  count=$(remove_containers)
+  echo "nophi: removed $count sandbox container(s) for $root"
+  exit 0
+fi
+
+command -v devcontainer >/dev/null || die "devcontainer CLI not found; run: brew install devcontainer"
+
+if [ "$checked" = 0 ]; then
+  specs=()
+  for ext in csv tsv xls xlsx parquet avro orc jsonl ndjson sql dump bak sqlite sqlite3 db; do
+    specs+=(":(glob,icase)**/*.$ext")
+  done
+  # Without --exclude-standard, gitignored files count too.
+  found=$(git -C "$root" ls-files --others -z -- "${specs[@]}" | tr '\0' '\n')
+  if [ -n "$found" ]; then
+    total=0
+    echo "nophi: untracked data-like files in $root:" >&2
+    while IFS= read -r file; do
+      total=$((total + 1))
+      [ "$total" -gt 10 ] || echo "  $file" >&2
+    done <<<"$found"
+    [ "$total" -le 10 ] || echo "  ... $total files in all" >&2
+    die "move them out of the repo, or rerun with --i-checked-no-phi once you know they hold no PHI"
+  fi
+fi
+
+up=(devcontainer up "${dc[@]}")
+[ "$rebuild" = 0 ] || up+=(--remove-existing-container)
+log=$(mktemp)
+echo "nophi: starting the NO PHI sandbox; the first run builds the image"
+if ! "${up[@]}" >"$log" 2>&1; then
+  tail -n 30 "$log" >&2
+  # The CLI marks postStartCommand (the firewall) as done before it runs, so a
+  # container left behind by a failed start would skip the firewall on the next up.
+  remove_containers >/dev/null
+  die "could not start the sandbox; full log: $log"
+fi
+rm -f "$log"
+
+# Codex logins need no AWS, so they skip the guardrail check.
+if [ "$cmd" != shell ] && ! { [ "$cmd" = codex ] && [ "${1:-}" = login ]; }; then
+  status=0
+  # shellcheck disable=SC2016 # $1 expands inside the container
+  out=$(devcontainer exec "${dc[@]}" sh -c 'printf %s "$1" | node /opt/phi-guard/dist/codex-prompt.mjs' _ \
+    '{"prompt":"nophi health check"}' </dev/null 2>/dev/null) || status=$?
+  if [ "$status" != 0 ] || [ -n "$out" ]; then
+    reason=$(printf %s "$out" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
+    echo "nophi: the guardrail health check failed: ${reason:-${out:-exit status $status}}" >&2
+    die "if this is a credentials error, run good-morning on this machine (profile phi-guard)"
+  fi
+fi
+
+if [ -t 1 ] && { : >/dev/tty; } 2>/dev/null; then
+  # Dark red on dark themes, light pink on light ones (COLORFGBG ends in the background).
+  tint='#3b0d0d'
+  case ${COLORFGBG:+${COLORFGBG##*;}} in 7 | 15) tint='#ffe6e6' ;; esac
+  # shellcheck disable=SC2329 # runs from the EXIT trap
+  restore_terminal() {
+    printf '\033]111\007\033]2;\007' >/dev/tty
+    if [ "${TERM_PROGRAM:-}" = iTerm.app ]; then
+      printf '\033]6;1;bg;*;default\007\033]1337;SetBadgeFormat=\007' >/dev/tty
+    fi
+  }
+  trap restore_terminal EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  printf '\033]2;NO PHI · %s\007\033]11;%s\007' "$(basename "$root")" "$tint" >/dev/tty
+  if [ "${TERM_PROGRAM:-}" = iTerm.app ]; then
+    printf '\033]6;1;bg;red;brightness;200\007\033]6;1;bg;green;brightness;0\007\033]6;1;bg;blue;brightness;0\007' >/dev/tty
+    printf '\033]1337;SetBadgeFormat=%s\007' "$(printf %s 'NO PHI' | base64)" >/dev/tty
+  fi
+fi
+
+agent=$cmd
+[ "$cmd" != shell ] || agent=zsh
+status=0
+devcontainer exec "${dc[@]}" --remote-env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 "$agent" "$@" || status=$?
+exit "$status"
