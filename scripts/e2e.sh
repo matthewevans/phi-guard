@@ -6,7 +6,7 @@
 # Cost: one cheap-model call per output scenario (claude --model haiku, codex -m
 # gpt-6-luna at low reasoning effort), nothing for the blocked-prompt scenarios, which
 # never reach the model. That is five calls (C2, C3, X2, X3, X4) and about a minute in
-# total (observed), plus two when the live scenarios run (LC2, LX2). A missing CLI makes
+# total (observed), plus three when the live scenarios run (LC2, LC3, LX2). A missing CLI makes
 # that agent's scenarios SKIP; the exit status is non-zero if any scenario FAILs or if
 # nothing ran.
 #
@@ -61,9 +61,17 @@
 #        prompt and the PostToolUse hook) runs `cat` on a file holding the fake PII,
 #        under a benign prompt. Neither fake value appears anywhere in the run output
 #        and the answer carries a Bedrock mask tag (match \{[A-Z_]+\}); the tags seen are
-#        the evidence, as the tag format is unverified (ARCHITECTURE, Part 2 item 4). If
+#        the evidence for the tag format (ARCHITECTURE, Part 2 verification, item 4). If
 #        the legacy `Action: BLOCK` wins on output (item 2), the answer shows the
 #        guardrail's or the hook's withheld notice instead and the tag check FAILs.
+#   LC3  Claude, file read masked. As LC2, but Bash is disallowed so the model reads the
+#        file with the Read tool, and the shipped Read|Grep PostToolUse hook masks it. The
+#        run used Read, no fake value appears anywhere in the run output, and the answer
+#        carries a mask tag.
+#   LC4  Claude, @file mention blocked. A prompt with no PII of its own @-mentions the
+#        fake-PII file, whose contents Claude Code attaches without a tool call. The
+#        prompt hook scans the file: the block reason names "in @pii.txt" and at least
+#        one finding type, and the model never runs (zero tokens, no assistant message).
 #   LX1  Codex, prompt blocked. The shipped UserPromptSubmit hook with the real values:
 #        zero tokens, no agent message, the fake values absent from the stream. LX1 cannot
 #        tell a detection from a fail-closed scan error unless Codex surfaces the hook's
@@ -291,6 +299,33 @@ scenario_lc2() {
   finish
 }
 
+scenario_lc3() {
+  begin_live LC3 || return 0
+  claude_run lc3 "Use the Read tool to read $WORK/pii.txt . Then reply with ONLY the file text you received, verbatim." \
+    "$(live_claude_settings)" --plugin-dir "$ROOT" --disallowedTools Bash
+  events tools claude "$TMP/lc3.out" >"$TMP/lc3.tools"
+  EVIDENCE="tools=[$(paste -sd, - <"$TMP/lc3.tools")], mask tags=[$(mask_tags "$TMP/lc3.answer")]; $(oneline "$TMP/lc3.answer")"
+  check 'the model did not call Read' grep -qx Read "$TMP/lc3.tools"
+  check 'answer lacks a mask tag' matches '\{[A-Z_]+\}' "$TMP/lc3.answer"
+  check 'fake values in the run output' unleaked "$TMP/lc3.out" "$TMP/lc3.err"
+  finish
+}
+
+scenario_lc4() {
+  begin_live LC4 || return 0
+  claude_run lc4 "Please summarise @pii.txt in one line." "$(live_claude_settings)" --plugin-dir "$ROOT"
+  events model-text claude "$TMP/lc4.out" >"$TMP/lc4.model"
+  local tokens types=''
+  tokens=$(events tokens claude "$TMP/lc4.out")
+  if [[ $(<"$TMP/lc4.answer") =~ blocked\ this\ prompt:\ possible\ ([A-Za-z_]+(,\ [A-Za-z_]+)*)\ in\ @pii\.txt\. ]]; then types=${BASH_REMATCH[1]}; fi
+  EVIDENCE="types=${types:-none}, tokens=$tokens"
+  check 'no block reason naming @pii.txt with a finding type in the output' test -n "$types"
+  check 'the model ran (tokens used)' test "$tokens" = 0
+  check 'the model produced text' empty "$TMP/lc4.model"
+  check 'fake values in the model output' unleaked "$TMP/lc4.model"
+  finish
+}
+
 scenario_c3() {
   begin C3 || return 0
   claude_hook_settings --swap bash-output.mjs="$TMP/canary-claude.mjs" >"$TMP/c3.json"
@@ -428,8 +463,10 @@ if command -v claude >/dev/null; then
   scenario_c3
   scenario_lc1
   scenario_lc2
+  scenario_lc3
+  scenario_lc4
 else
-  for SCENARIO in C1 C2 C3 LC1 LC2; do begin "$SCENARIO" && skip 'claude is not installed'; done
+  for SCENARIO in C1 C2 C3 LC1 LC2 LC3 LC4; do begin "$SCENARIO" && skip 'claude is not installed'; done
 fi
 
 if command -v codex >/dev/null; then

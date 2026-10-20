@@ -1,7 +1,7 @@
 {
   "name": "phi-guard",
   "version": "0.1.0",
-  "description": "Blocks PHI in prompts and masks it in Bash output before it reaches the model, using Amazon Bedrock Guardrails.",
+  "description": "Blocks PHI in prompts and masks it in Bash output and file reads before it reaches the model, using Amazon Bedrock Guardrails.",
   "author": {
     "name": "Matt Evans"
   },

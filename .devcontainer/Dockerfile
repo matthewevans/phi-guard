@@ -5,7 +5,8 @@
 #
 # Changes: Claude Code and Codex CLI are pinned and installed as root into the
 # root-owned /usr/local prefix (the agent cannot rewrite its own CLI), phi-guard and
-# the managed agent config are copied in root-owned, and the oh-my-zsh and git-delta
+# the managed agent config are copied in root-owned, `claude` is replaced by a wrapper
+# that loads phi-guard from the command line, and the oh-my-zsh and git-delta
 # downloads are dropped. Codex runs with danger-full-access (see
 # codex/managed_config.toml), so the image carries no bubblewrap.
 # Build context is the repo root (see devcontainer.json).
@@ -39,6 +40,12 @@ RUN npm install -g \
   @openai/codex@${CODEX_VERSION} \
   && npm cache clean --force
 
+# Every Claude start goes through the wrapper, which loads phi-guard from the command line
+# too (see claude.sh). The build fails if the CLI moves out from under it.
+RUN test -x /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe && rm /usr/local/bin/claude
+COPY .devcontainer/claude.sh /usr/local/bin/claude
+RUN chmod 0755 /usr/local/bin/claude
+
 # The plugin's runtime files only, root-owned and read-only for user node. Claude
 # loads it as a directory marketplace; Codex runs its dist/ bundles as managed hooks.
 COPY .claude-plugin /opt/phi-guard/.claude-plugin
@@ -57,8 +64,8 @@ RUN chmod 0644 /etc/claude-code/managed-settings.d/phi-guard.json /etc/codex/*.t
 # Visible sandbox markers: the Claude status line (named in phi-guard.json) and an
 # interactive shell banner and prompt prefix, which both system rc files source. Neither
 # touches non-interactive shells, where the hook commands run.
-COPY .devcontainer/statusline.sh .devcontainer/sandbox-banner.sh /opt/phi-guard/
-RUN chmod 0755 /opt/phi-guard/statusline.sh && chmod 0644 /opt/phi-guard/sandbox-banner.sh && \
+COPY .devcontainer/statusline.sh .devcontainer/sandbox-banner.sh .devcontainer/health-check.sh /opt/phi-guard/
+RUN chmod 0755 /opt/phi-guard/statusline.sh /opt/phi-guard/health-check.sh && chmod 0644 /opt/phi-guard/sandbox-banner.sh && \
   echo '. /opt/phi-guard/sandbox-banner.sh' | tee -a /etc/zsh/zshrc /etc/bash.bashrc > /dev/null
 
 # Create workspace and config directories and set permissions
@@ -118,6 +125,11 @@ RUN settings=/etc/claude-code/managed-settings.d/phi-guard.json && \
     --arg aws_profile "$PHI_GUARD_AWS_PROFILE" \
     '.pluginConfigs["phi-guard@phi-guard"].options = $ARGS.named' "$settings") && \
   printf '%s\n' "$contents" > "$settings"
+
+# The same plugin options, env pins, permissions and status line for the wrapper's
+# --settings file. A --plugin-dir plugin reads its options under the id <name>@inline.
+RUN jq '{env, permissions, statusLine, pluginConfigs: {"phi-guard@inline": .pluginConfigs["phi-guard@phi-guard"]}}' \
+  /etc/claude-code/managed-settings.d/phi-guard.json > /opt/phi-guard/claude-settings.json
 
 # Codex has no plugin options, so it reads the same values from the environment.
 ENV PHI_GUARD_GUARDRAIL_ID=$PHI_GUARD_GUARDRAIL_ID

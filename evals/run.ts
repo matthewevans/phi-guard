@@ -1,4 +1,5 @@
-// pnpm eval: scans the corpus through the shipped Claude hook bundles against one or more
+// pnpm eval: scans the corpus through the shipped Claude hook bundles (each case as Bash
+// output, as a Read result, and as a prompt for prompt-shaped formats) against one or more
 // real guardrails, writes evals/results/<timestamp>/results.json and prints a summary.
 //
 //   pnpm eval [--target <name>=<guardrailId>:<version>]... [--case <glob>] [--concurrency <n>] [--list]
@@ -12,7 +13,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, matchesGlob } from 'node:path';
 import { parseArgs } from 'node:util';
 import { PROMPT_FORMATS, type Case } from './case.ts';
-import { classifyBash, classifyPrompt } from './classify.ts';
+import { classifyBash, classifyPrompt, classifyRead } from './classify.ts';
 import { buildCorpus } from './corpus.ts';
 import { hookSpec, runHook, type HookRun } from './hooks.ts';
 import { runFailed, type Run } from './metrics.ts';
@@ -79,7 +80,8 @@ const targets: Target[] =
 
 const template = readTemplate();
 const knownTypes = new Set([...template.entityTypes, ...template.regexes.map(({ name }) => name)]);
-const outputHook = hookSpec('PostToolUse');
+const outputHook = hookSpec('PostToolUse', 'Bash');
+const fileHook = hookSpec('PostToolUse', 'Read|Grep');
 const promptHook = hookSpec('UserPromptSubmit');
 
 // A killed or crashed hook is an error outcome, the same as a hook that reports a scan failure.
@@ -90,7 +92,25 @@ async function runCase(testCase: Case, env: NodeJS.ProcessEnv): Promise<Run> {
   const toolResponse = { stdout: testCase.text, stderr: '', interrupted: false, isImage: false };
   const scan = await runHook(outputHook, JSON.stringify({ tool_response: toolResponse }), env);
   const outcome = settle(scan, (stdout) => classifyBash(stdout, template.blockedOutputsMessaging));
-  const run: Run = { testCase, output: scoreOutput(testCase, outcome, scan.ms) };
+  // The Read result shape Claude Code 2.1.296 sends (observed).
+  const lines = testCase.text.split('\n').length;
+  const readResponse = {
+    type: 'text',
+    file: {
+      filePath: `/workspace/${testCase.id}`,
+      content: testCase.text,
+      numLines: lines,
+      startLine: 1,
+      totalLines: lines,
+    },
+  };
+  const read = await runHook(fileHook, JSON.stringify({ tool_name: 'Read', tool_response: readResponse }), env);
+  const fileOutcome = settle(read, (stdout) => classifyRead(stdout, template.blockedOutputsMessaging));
+  const run: Run = {
+    testCase,
+    output: scoreOutput(testCase, outcome, scan.ms),
+    file: scoreOutput(testCase, fileOutcome, read.ms),
+  };
   if (PROMPT_FORMATS.has(testCase.format)) {
     const check = await runHook(promptHook, JSON.stringify({ prompt: testCase.text }), env);
     run.prompt = scorePrompt(testCase, settle(check, classifyPrompt), check.ms, knownTypes);
@@ -110,7 +130,7 @@ mkdirSync(resultsDir, { recursive: true });
 // Ids, outcomes, indexes, types and timings only: never case text or planted values.
 const persisted = results.map(({ name, runs }) => ({
   name,
-  runs: runs.map(({ testCase, output, prompt }) => ({ id: testCase.id, output, prompt })),
+  runs: runs.map(({ testCase, output, file, prompt }) => ({ id: testCase.id, output, file, prompt })),
 }));
 writeFileSync(join(resultsDir, 'results.json'), `${JSON.stringify({ targets: persisted }, null, 2)}\n`);
 

@@ -11,15 +11,18 @@ export interface BashResponse {
   isImage: boolean;
 }
 
-export interface PostToolUseOutput {
+export interface PostToolUseOutput<Response = BashResponse> {
   hookSpecificOutput: {
     hookEventName: 'PostToolUse';
-    updatedToolOutput: BashResponse;
+    updatedToolOutput: Response;
     additionalContext?: string;
   };
 }
 
-function replaceOutput(updatedToolOutput: BashResponse, additionalContext?: string): PostToolUseOutput {
+export function replaceOutput<Response>(
+  updatedToolOutput: Response,
+  additionalContext?: string,
+): PostToolUseOutput<Response> {
   return { hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput, additionalContext } };
 }
 

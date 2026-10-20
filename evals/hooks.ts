@@ -10,7 +10,7 @@ const root = resolve(import.meta.dirname, '..');
 type HookEvent = 'UserPromptSubmit' | 'PostToolUse';
 
 interface HooksFile {
-  hooks: Record<HookEvent, { hooks: { command: string; args: string[]; timeout: number }[] }[]>;
+  hooks: Record<HookEvent, { matcher?: string; hooks: { command: string; args: string[]; timeout: number }[] }[]>;
 }
 
 export interface HookSpec {
@@ -19,9 +19,12 @@ export interface HookSpec {
   timeoutMs: number;
 }
 
-export function hookSpec(event: HookEvent): HookSpec {
+/** The entry for `event` whose matcher is `matcher` (none for UserPromptSubmit). */
+export function hookSpec(event: HookEvent, matcher?: string): HookSpec {
   const file: HooksFile = JSON.parse(readFileSync(join(root, 'hooks/hooks.json'), 'utf8'));
-  const { command, args, timeout } = file.hooks[event][0].hooks[0];
+  const entry = file.hooks[event].find((candidate) => candidate.matcher === matcher);
+  if (!entry) throw new Error(`hooks/hooks.json has no ${event} entry with matcher ${matcher}`);
+  const { command, args, timeout } = entry.hooks[0];
   return {
     command,
     args: args.map((arg) => arg.replaceAll('${CLAUDE_PLUGIN_ROOT}', root)),

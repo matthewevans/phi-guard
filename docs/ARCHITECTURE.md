@@ -19,7 +19,7 @@ flowchart LR
     cc["Claude Code<br/>(personal subscription)"]
     cx["Codex CLI<br/>(danger-full-access)"]
     ph[["prompt hooks<br/>UserPromptSubmit"]]
-    bh[["Claude output hook<br/>PostToolUse · Bash"]]
+    bh[["Claude output hooks<br/>PostToolUse · Bash, Read, Grep"]]
     pre[["Codex PreToolUse hook<br/>rewrites Bash commands"]]
     rn[["Codex runner<br/>buffer only, offline"]]
     post[["Codex PostToolUse hook<br/>scans the capture"]]
@@ -41,7 +41,7 @@ flowchart LR
   cx -->|every prompt| ph
   ph -->|"ApplyGuardrail (INPUT)"| gr
   cc -->|runs commands| repo
-  cc -->|every Bash result| bh
+  cc -->|every Bash, Read and Grep result| bh
   bh -->|"ApplyGuardrail (OUTPUT)"| gr
   cx -->|every Bash command| pre
   pre -->|"runner command line"| cx
@@ -118,6 +118,22 @@ sequenceDiagram
   CC->>M: tool result
 ```
 
+Files reach Claude Code's model by two more paths, both scanned:
+
+- **Read and Grep.** A second PostToolUse hook (`dist/file-output.mjs`, matcher
+  `Read|Grep`) scans the file text in `tool_response` (`file.content` for Read,
+  `content` for Grep) and replaces it with the masked text, as the Bash hook does.
+  A Read result whose `type` is not `text` (an image or a PDF, for example) is withheld,
+  because only text can be scanned. Observed on Claude Code 2.1.296: both result shapes,
+  and that `updatedToolOutput` replaces both. Grep's file names are not scanned.
+- **`@file` mentions.** Claude Code attaches a mentioned file's contents to the prompt
+  without a tool call, and the UserPromptSubmit hook receives only the prompt text and
+  `cwd` (observed). The Claude prompt hook therefore resolves each `@path` and
+  `@"path"` against `cwd` (`~/` against the home directory), drops a `#L10-20` range
+  and trailing punctuation, and scans each file it finds alongside the prompt. A file
+  over 1,000,000 bytes, or one holding a NUL byte, blocks the prompt. A mention that
+  names no file (a directory, a handle, a missing path) is skipped.
+
 Codex. The prompt path matches Claude Code's. Commands go through the wrapper:
 
 ```mermaid
@@ -173,9 +189,10 @@ PostToolUse scans `tool_response` directly.
 | Committed fixtures and history | Policy: no PHI committed; a fresh or shallow clone is safest | Covered by policy | Covered by policy |
 | Text the developer types or pastes | Prompt hook (block) | Covered, limited by detection | Covered, limited by detection |
 | Command output (tests, scripts) | Output hook (mask) | Covered for the `Bash` tool, limited by detection | Covered for the `Bash` tool through the wrapper, limited by detection |
-| Files read with the Read tool, `@file` mentions | Not yet | **Gap** (stretch goal) | A file read through a shell command is command output and is scanned. No claim is made for other read paths |
+| Files read with the Read or Grep tool | File output hook (mask) | Covered for the file text, limited by detection. File names in Grep and Glob results are not scanned | A file read through a shell command is command output and is scanned. No claim is made for other read paths |
+| `@file` mentions | Prompt hook (block) | Covered, limited by detection, for mentions the hook can resolve to a file (see Request flow) | No claim is made |
 | Pasted screenshots, images | None (no hook sees images) | **Gap**: policy only | **Gap**: policy only, including images opened with `view_image` |
-| Other tools | Hook matchers | Only `Bash` output is scanned | The `^Bash$` matcher does not see other tools: for example `apply_patch`, `view_image`, other local function tools, and extension or MCP tools, which hook under `mcp__<server>__<tool>` names |
+| Other tools | Hook matchers | Only `Bash`, `Read` and `Grep` output is scanned. `Edit` and `Write` results are not, and the file snippet Claude Code shows the model after an edit can hold lines that a masked Read hid (inferred, not observed) | The `^Bash$` matcher does not see other tools: for example `apply_patch`, `view_image`, other local function tools, and extension or MCP tools, which hook under `mcp__<server>__<tool>` names |
 | Commands the user runs themselves with `!` | None | n/a | **Gap**: Codex runs them with no hooks, and their output enters the context |
 | Shell-like MCP tools | Container config | Allowlist of none configured | Allowlist of none configured |
 
@@ -218,17 +235,22 @@ fresh network namespace, and re-running it in place is not supported.
 
 Claude Code:
 
+The output hook column covers both PostToolUse hooks: Bash, and Read and Grep.
+
 | Failure | Prompt hook | Output hook |
 |---|---|---|
 | Guardrail flags PHI | Blocks the prompt | Masks the values |
 | AWS error, throttling, bad credentials | Blocks (own catch) | Withholds output (own catch) |
 | The Bedrock call takes longer than 10s (an AbortSignal on the HTTP request) | Blocks | Withholds |
 | Own 15s deadline (credential resolution or stdin hangs; the AbortSignal covers only the HTTP request) | Blocks | Withholds |
-| `tool_response` lacks `stdout` and `stderr` strings (the Bash result shape changed) | n/a | Withholds (`InvalidHookInput`) if Claude Code accepts the replacement shape (next row) |
-| The guardrail scanned fewer characters than were sent (text over its size quota) | Blocks (`PartialGuardrailCoverage`) | Withholds (`PartialGuardrailCoverage`) |
-| The response omits `guardrailCoverage`, so a partial scan cannot be seen (unverified whether the API ever omits it) | **Fails open** for that prompt | **Fails open** for that output |
+| `tool_response` has an unexpected shape (Bash without `stdout` and `stderr` strings, Read without a `file.content` string, Grep `content` that is not a string) | n/a | Withholds (`InvalidHookInput`) if Claude Code accepts the replacement shape (next row) |
+| Text over the size quota. In us-east-1 the API rejects it with `ThrottlingException` (observed). A response that reports fewer guarded characters than were sent becomes `PartialGuardrailCoverage` | Blocks | Withholds |
+| The response omits `guardrailCoverage`, so a partial scan cannot be seen (every Part 2 response carried it) | **Fails open** for that prompt | **Fails open** for that output |
+| An `@`-mentioned file is over 1,000,000 bytes or holds a NUL byte | Blocks (`AttachmentTooLarge`, `UnscannableAttachment`) | n/a |
+| A Read result is not text (an image, a PDF) | n/a | Withholds |
 | Hook crashes, or is killed at the 20s hook timeout (the 15s deadline makes a kill unlikely) | Blocks (`onFailure: "block"`) | **Fails open**: `onFailure` can't withhold PostToolUse output |
 | Replacement output has the wrong shape | n/a | **Fails open**: Claude Code ignores it. The hook spreads the original fields, and `scripts/e2e.sh` checks this |
+| Claude Code started without the wrapper under an org login (see [Org logins](#org-logins)) | **Fails open**: the plugin is not loaded | **Fails open** |
 | Same-uid tampering (see [Same-uid tampering](#same-uid-tampering)) | **Can fail open** for every later prompt in the session. A substituted `node` that exits 0 with no output is not a failure | **Can fail open** for every later command in the session |
 
 The crash-or-kill row is why the output hook is bundled with no runtime
@@ -348,7 +370,8 @@ It registers the plugin directory `/opt/phi-guard` as a marketplace
 (`extraKnownMarketplaces`), force-enables `phi-guard@phi-guard`, sets
 `pluginConfigs`, sets `permissions.disableBypassPermissionsMode: "disable"`, and
 sets `allowManagedMcpServersOnly` with an empty `allowedMcpServers`,
-`allowManagedHooksOnly`, and the `env` pins described above.
+`allowManagedHooksOnly`, and the `env` pins described above. An org login replaces
+that file, and [Org logins](#org-logins) says how the image keeps the plugin loaded.
 
 **Codex.** Plugin hooks need the user to review and trust them (trust is recorded
 against the hook's hash), and `allow_managed_hooks_only` skips them (from the Codex
@@ -384,6 +407,68 @@ invalid one.
   `--dangerously-skip-permissions` to `auto` mode, and the flag is accepted.
 - Codex `--yolo` and `-c approval_policy=...` fall back to `on-request` with a
   warning that names `/etc/codex/managed_config.toml` as the constraint.
+
+## Org logins
+
+A company login can bring its own managed policy, which displaces the container's.
+
+**Claude Code.** Managed settings are first-wins: when a Team or Enterprise login
+fetches the org's server-managed settings, they replace the managed settings files
+under `/etc/claude-code/managed-settings.d/`. Only a few keys merge across managed
+sources, and the `managedSourcesBehavior: "merge"` opt-in is read only from the
+highest-ranked source, so a file cannot opt itself back in (from the Claude Code
+settings documentation). Observed on 2.1.296 with an Enterprise login: phi-guard was
+not loaded, no hook ran, the status line was gone, and a fake-PII prompt reached the
+model. With an empty `CLAUDE_CONFIG_DIR`
+the same image loaded the plugin.
+
+The image closes this with a wrapper. `/usr/local/bin/claude` is
+`.devcontainer/claude.sh`, which runs the CLI with `--plugin-dir /opt/phi-guard` and
+`--settings /opt/phi-guard/claude-settings.json`. The Dockerfile derives that file
+from the managed settings: the same `env` pins, `permissions`, `statusLine`, and the
+plugin options under `pluginConfigs["phi-guard@inline"]`, the id a `--plugin-dir`
+plugin reads. Command-line settings rank below managed settings and above user,
+project and local settings. Observed on 2.1.296:
+
+- Under the Enterprise login the wrapper loads the plugin and its options. The prompt,
+  `@file`, Read, Grep and Bash paths all blocked or masked the fake PII.
+- Under the managed file alone (a personal login, or none) the two sources register as
+  one `phi-guard@phi-guard`, and each hook runs once.
+- A wrong options key fails closed (`MissingGuardrailConfig`).
+
+Under an org login the managed-only keys in the phi-guard file (`allowManagedHooksOnly`,
+the empty MCP allowlist, the marketplace entry) give way to whatever the org sets. If the
+org sets `allowManagedHooksOnly`, the command-line plugin's hooks do not load (inferred,
+as for `pnpm e2e` in the README). The
+launcher's health check catches that, as it does any other way the hooks go missing:
+before the agent starts, `nophi` sends a fake-PII canary prompt through the real
+`claude` and passes only when phi-guard blocks it before any model call (`total_cost_usd`
+0). The prompt hook runs before authentication, so the check also works before the
+first login.
+
+Residuals:
+
+- **Other ways to start Claude Code.** Only `/usr/local/bin/claude` carries the flags.
+  Running the CLI binary by its full path, through `npx`, or from an editor extension
+  that ships its own binary (the VS Code extension does) bypasses the wrapper. Under an
+  org login those sessions run without phi-guard. This is same-uid action (see
+  [Same-uid tampering](#same-uid-tampering)), and `nophi` launches only through the
+  wrapper.
+- **A login made inside a running session.** The canary runs once, at launch. The
+  wrapper's flags still apply after a mid-session `/login`, and an org that sets
+  `allowManagedHooksOnly` is caught at the next `nophi` start (inferred, not observed).
+- **Status line text.** It says `personal subscription sandbox` under any login.
+
+**Codex.** A ChatGPT business or enterprise workspace login fetches cloud requirements,
+which merge over `/etc/codex/requirements.toml` (from the Codex 0.162.1 source, not
+observed). Managed hooks are append-only, so cloud requirements cannot remove phi-guard's.
+Scalar keys such as `allow_managed_hooks_only` and `[features] hooks` can be set by the
+cloud layer, so an org could turn hooks off (inferred from the source). `/debug-config`
+shows the source of each requirement. The health check covers this too: when
+`codex login status` reports a login, it runs the canary through `codex exec` and passes
+only when the turn completes with zero token usage and no agent message. Signed out, only
+the files apply, and it checks the guardrail alone. The Codex canary has run only against
+stubs, because no Codex login was available in Part 2.
 
 ## Devcontainer notes
 
@@ -460,9 +545,13 @@ Residuals:
   exports pass, and so do compressed exports (`.gz`, `.zip`), files inside nested git
   repos or submodules (`git ls-files` does not list them), and PHI inside a source
   file. It guards against forgetting, and a determined bypass is out of scope.
-- **Health check.** One benign prompt through the Codex prompt hook shows that the
-  hook's config, credentials and Bedrock are reachable at launch time. It says nothing
-  about later calls, which fail closed in the hooks.
+- **Health check.** `/opt/phi-guard/health-check.sh` runs before the agent starts. For
+  Claude it sends a fake-PII canary through the real CLI (see [Org logins](#org-logins)),
+  so it proves the hooks load and the guardrail answers. For Codex it sends one benign
+  prompt through the prompt hook, and when Codex is signed in it also runs the canary.
+  The canary is fake data because a missing hook sends it to the model. The check says
+  nothing about later calls, which fail closed in the hooks, or about a login made after
+  launch. `nophi shell` and `nophi codex login` skip it.
 - **Terminal markers.** The title, tint, tab colour and badge depend on the terminal
   honouring the escape sequences. Terminals that ignore them show nothing, and an
   agent or shell that sets its own title or colours can overwrite them. The in-container
@@ -486,25 +575,31 @@ Residuals:
   CloudFormation parameters at deploy time.
 - There is no date type. The `PersonDate` regex catches a date next to a key that ties it
   to a person: birth, admission or admit, discharge, service or DOS, death. A bare date
-  (a timestamp, a changelog entry, a written-out birthday) is left alone. Deploying
-  `infra/guardrail.yaml` with `DatePolicy=All` as a second stack also masks any full date
-  with a month and day, and `pnpm eval` compares the two (see [Evals](#evals)).
+  (a timestamp, a changelog entry, a written-out birthday) is left alone, and so is a
+  date whose key sits in a column header (CSV, psql tables) or a positional field (HL7).
+  Deploying `infra/guardrail.yaml` with `DatePolicy=All` as a second stack also masks any
+  full date with a month and day, and `pnpm eval` compares the two (see [Evals](#evals)).
+- Name detection is ML-based and misses some names. In Part 2 the fake surname
+  `Example` survived next to a masked first name (`patient {NAME} Example`).
 - **Size limit.** `ApplyGuardrail` scans at most 1,000 text units (about 1,000,000
   characters) of sensitive-information input in the large US Regions and 106 (about
-  106,000 characters) elsewhere. For larger text the API reports how many
-  characters it guarded and raises no error. The scanner turns a shortfall into `PartialGuardrailCoverage`,
-  so both hooks fail closed: a prompt over the limit is blocked and a Claude command
-  output over it is withheld. Codex already caps each scan at a 20 KB head and tail, so
-  this applies to the Claude path. The quotas and the report fields come from AWS
-  documentation and are unverified here; `pnpm eval` brackets both quotas.
+  106,000 characters) elsewhere, according to AWS documentation. In us-east-1 a request
+  over the quota fails with `ThrottlingException` every time (observed at 1,011 text
+  units, also at concurrency 1), so both hooks fail closed: a prompt over the limit is
+  blocked and a Claude output over it is withheld, with that error name. AWS documents a
+  different behaviour, a response that reports fewer guarded characters than were sent;
+  the scanner turns that into `PartialGuardrailCoverage`, which fails closed the same way.
+  The 106-unit quota was not tested. Codex already caps each scan at a 20 KB head and
+  tail, so this applies to the Claude path.
 - URL, IP_ADDRESS, AGE, USERNAME and PASSWORD are off because they're noisy in dev
   output.
 
 ## Evals
 
 `pnpm eval` (`evals/`) scans a labelled synthetic corpus through the shipped Claude hook
-bundles against real guardrails. It spawns `dist/bash-output.mjs` for every case and
-`dist/prompt.mjs` for prompt-shaped cases (prose and tickets), with the command, args and
+bundles against real guardrails. It spawns `dist/bash-output.mjs` for every case, then
+`dist/file-output.mjs` with the same text as a Read result, and `dist/prompt.mjs` for
+prompt-shaped cases (prose and tickets), with the command, args and
 timeout from `hooks/hooks.json` and the stdin JSON and `CLAUDE_PLUGIN_OPTION_*` environment
 Claude Code provides. The README's [Evals](../README.md#evals) section covers usage.
 Codex shares the scanner core, so detection quality is the same; the Codex contract
@@ -543,7 +638,8 @@ full stdout to the PostToolUse hook, which is unverified.
   (each with a Wilson 95% interval), errors by name, hook latency p50, p95 and max (process
   start and credential resolution included, against the 20 s hook timeout), and text units
   with estimated cost. The output overview adds the withheld total and the mask tags seen,
-  and the prompt overview adds blocks that missed an expected type and reported types the
+  the file overview adds the withheld total and the cases it scored unlike the output
+  surface, and the prompt overview adds blocks that missed an expected type and reported types the
   template does not define. The output tables break this down further: by category and
   sub-category (coverage, values, recall with interval, leaked values, withheld cases) and by
   format (cases, recall, false-positive rate, withheld, errors). The prompt surface has a
@@ -559,6 +655,16 @@ full stdout to the PostToolUse hook, which is unverified.
   Format-valid generated SSNs could coincide with real numbers, which is why they are a
   sub-category of their own. A name inside a stack trace or a pipe-delimited message may
   go undetected, and the evals report how often.
+- **Part 2 results** (us-east-1, `DatePolicy=Keyed`, 680 cases, about $0.31 per run).
+  Output recall 87.1% (889 of 1,021 values) with an 18.6% false-positive rate (21 of 113
+  negatives). The false positives are git authors (masked as `NAME` and `EMAIL`),
+  example emails in docs and test card numbers. Date recall is 63.3%, and its leaks
+  sit in the tabular formats named in Detection limits. Prompt recall is 100% (122 of
+  122) with no false positives, and every block named all the expected types. Hook
+  latency p50 is about 1.0 s, p95 about 1.1 s. `DatePolicy=All` raises output recall to
+  94.7% but output false positives to 75.2% and prompt false positives to 14 of 14,
+  because it masks every log timestamp and blocks every prompt with a date, so
+  `Keyed` stays the default.
 
 ## Cost (Guardrails PII filter at $0.10 per 1,000 text units; regexes free)
 
@@ -573,49 +679,52 @@ to two requests. Codex scans one capture per command, and the capture always end
 with an exit-code line, so every command costs at least one request, and at most
 about 20 text units (the 20,000-byte bound), roughly $0.002 at the rate above.
 
-## Not yet verified (Part 2)
+## Part 2 verification
 
-Part 1 had no AWS access. Nothing below is claimed to work.
+Part 1 had no AWS access. Part 2 ran `pnpm check`, `pnpm e2e` (all scenarios, the four
+live ones included) and `pnpm eval` against guardrails deployed from
+`infra/guardrail.yaml` in us-east-1, then the launcher with an Enterprise login.
 
-1. The regex dialect Guardrails accepts. The `PersonDate` pattern avoids inline
-   flags and lookarounds and uses only portable syntax; `pnpm eval` shows whether it
-   matches.
-2. Whether `InputAction` and `OutputAction` take precedence over the legacy
-   required `Action` (set to BLOCK). Prompts are safe either way, because the
-   hook blocks on any intervention. `pnpm eval` shows it: a masked output means the
-   output action applied, and an output equal to the blocked message means `Action`
-   won.
-3. That the IAM resource for `bedrock:ApplyGuardrail` is the guardrail ARN from
-   `GetAtt GuardrailArn`.
-4. The masked tag format. `{NAME}` for PII and `{MemberId}` for regexes are
-   assumed. `pnpm eval` lists the tags it sees.
-5. Real latency per call and throttling behavior, including Service Quotas for
-   text units per second. For Codex, hook latency against the 20s hook timeout.
-   `pnpm eval` reports Claude hook latency and errors by name, and its size probes show
-   how the API treats text over each quota.
-6. The host-credential setup against the real `good-morning` flow: the SSO login and
-   token refresh inside the container (`portal.sso` and `oidc` as the only extra
-   hosts needed), and CodeArtifact npm installs, including whether package downloads
-   use any host beyond the repository endpoint. pip and other CodeArtifact tools need
-   `PHI_GUARD_EXTRA_HOSTS`. Also whether a host tool that replaces `~/.npmrc` instead
-   of editing it in place leaves the container's single-file mount on the old file
-   (inferred, not verified), and whether the files are readable by uid `node` on a
-   Linux host.
+1. **The regex dialect. Settled.** Bedrock accepted the `PersonDate` pattern, and all
+   three regexes match in the evals.
+2. **`InputAction` and `OutputAction` against the legacy `Action` (BLOCK). Settled.**
+   `OutputAction: ANONYMIZE` wins: no eval output on either guardrail came back as the
+   blocked message. `InputAction: BLOCK` applies to prompts.
+3. **The IAM resource for `bedrock:ApplyGuardrail`. Mostly settled.** The policy's
+   resource is the unversioned `GetAtt GuardrailArn`. `simulate-custom-policy` allows
+   `ApplyGuardrail` on it and denies other guardrails and other actions. Not proven
+   live from a principal that holds only this policy.
+4. **The mask tags. Settled.** PII entities become `{NAME}`, `{EMAIL}` and so on, and
+   regexes become `{MemberId}`, `{ClaimNumber}` and `{PersonDate}`. `{PersonDate}`
+   replaces the key along with the date (`dob: ...` becomes `{PersonDate}`).
+5. **Latency and throttling. Settled for Claude.** Hook p50 about 1.0 s, with no
+   throttling at normal sizes (see [Evals](#evals)). The over-quota behaviour is in
+   [Detection limits](#detection-limits). Codex hook latency was not timed. Its scans
+   are at most 20 KB and the live Codex scenarios passed, so it is likely similar.
+6. **The host-credential setup. Partly settled.** A host SSO session, read through the
+   read-only `~/.aws` mount in web mode, answered every scan in the container. Still
+   open: a token refresh inside the container, strict mode's `portal.sso` and `oidc`
+   hosts, CodeArtifact npm installs, a host tool that replaces `~/.npmrc` rather than
+   editing it, and the files' readability by uid `node` on a Linux host.
+7. **The role check. The probe does not work.** `apply-guardrail` with a well-formed
+   guardrail ID that does not exist returns `ValidationException` (the guardrail does not
+   exist), not `AccessDeniedException`, so Bedrock looks the guardrail up before it
+   checks the permission. Check a role against a real guardrail, or with
+   `aws iam simulate-principal-policy` on its ARN.
+8. **`guardrailCoverage.textCharacters`. Present, but no shortfall seen.** Every
+   response carried the field, with guarded equal to total. Over the quota, us-east-1
+   returns `ThrottlingException` instead of a shortfall, so `PartialGuardrailCoverage`
+   never triggered. Both fail closed.
 
-7. The `product-engineer` role check. On the work machine, after `good-morning`, find
-   the role and run the `apply-guardrail` probe with a well-formed guardrail ID that
-   does not exist. `AccessDeniedException` means the role lacks the permission, and
-   `ResourceNotFoundException` means it is permitted. That assumes IAM is evaluated
-   before the guardrail lookup, which is likely but unverified for this API. If the
-   permission is missing, attach `ApplyGuardrailPolicy` to the permission set.
-8. That `ApplyGuardrail` responses carry `guardrailCoverage.textCharacters` and report a
-   shortfall for text over the size quota. The scanner fails closed on a shortfall and
-   passes a response without the field (see the failure table), so the size probes in
-   `pnpm eval` must show a `PartialGuardrailCoverage` error above the quota.
+Still open:
 
-Also open: the launcher's health-check pass path (that `devcontainer exec` prints
-nothing on stdout when the guardrail answers), which is verified only against stubs
-because live runs exercised only the block path; a Codex PostToolUse run that masks a
-fake member ID against the real guardrail, Codex managed requirements behavior inside
-the running container (including the empty MCP allowlist against a real server), and the
-guardrail values exported on the host before the image is built.
+- A `SyntaxError` after 10 s on the 990,000-character probe against the `DatePolicy=All`
+  guardrail. The output was withheld, so it failed closed, but whether the SDK failed to
+  parse a large response or the hook crashed is not known.
+- The e2e masking scenarios check for a mask tag and the absence of each whole fake
+  value, so a partly masked value passes (see Detection limits). The evals measure this.
+- The Codex canary in the health check against a real ChatGPT workspace login, and a
+  Codex PostToolUse run that masks a fake member ID. Codex managed requirements inside
+  the running container, including the empty MCP allowlist against a real server.
+- The launcher's Claude health check pass path was observed live. Its Codex pass path
+  ran only against stubs.

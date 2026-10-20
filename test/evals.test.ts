@@ -9,19 +9,22 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Scan } from '../src/guardrail.ts';
 import { maskBashOutput } from '../src/hooks/bash-output.ts';
+import { maskFileOutput } from '../src/hooks/file-output.ts';
 import { checkPrompt } from '../src/hooks/prompt.ts';
 import { caseProblem, plant, type Case } from '../evals/case.ts';
-import { UNRECOGNIZED_OUTPUT, classifyBash, classifyPrompt } from '../evals/classify.ts';
+import { UNRECOGNIZED_OUTPUT, classifyBash, classifyPrompt, classifyRead } from '../evals/classify.ts';
 import { buildCorpus } from '../evals/corpus.ts';
 import { hookSpec } from '../evals/hooks.ts';
 import {
   estimatedCost,
+  fileSurface,
   gateFailures,
   latency,
   rate,
   runFailed,
   summarizeOutput,
   summarizePrompt,
+  surfaceDifferences,
   textUnits,
   type Run,
 } from '../evals/metrics.ts';
@@ -279,6 +282,27 @@ test('classifies what maskBashOutput produces: masked, withheld by the guardrail
   assert.deepEqual(classifyBash('', blockedMessage), { kind: 'unchanged' });
 });
 
+test('classifies what maskFileOutput produces for a Read result: masked, withheld by the guardrail and unchanged', async () => {
+  const read = { type: 'text', file: { filePath: '/workspace/x', content: 'x' } };
+  const masked = await maskFileOutput('Read', read, flagging(['NAME'], '{NAME}'));
+  assert.deepEqual(classifyRead(JSON.stringify(masked), blockedMessage), {
+    kind: 'masked',
+    text: '{NAME}',
+    types: ['NAME'],
+  });
+
+  const withheld = await maskFileOutput('Read', read, flagging(['NAME'], blockedMessage));
+  assert.deepEqual(classifyRead(JSON.stringify(withheld), blockedMessage), { kind: 'withheld' });
+
+  assert.equal(await maskFileOutput('Read', read, clean), undefined);
+  assert.deepEqual(classifyRead('', blockedMessage), { kind: 'unchanged' });
+  assert.deepEqual(
+    classifyBash(JSON.stringify(masked), blockedMessage),
+    { kind: 'error', name: UNRECOGNIZED_OUTPUT },
+    'each surface reads its own field',
+  );
+});
+
 test('classifies what checkPrompt produces: blocked with its types, or passed', async () => {
   const blocked = await checkPrompt('x', flagging(['NAME', 'EMAIL'], 'x'));
   assert.deepEqual(classifyPrompt(JSON.stringify(blocked)), { kind: 'blocked', types: ['NAME', 'EMAIL'] });
@@ -297,6 +321,11 @@ test('classifies the shipped bundles failing closed, by spawning them without co
   const output = spawnHook('bash-output.mjs', JSON.stringify({ tool_response: bash }));
   assert.equal(output.status, 0, output.stderr);
   assert.deepEqual(classifyBash(output.stdout, blockedMessage), { kind: 'error', name: 'MissingGuardrailConfig' });
+
+  const read = { type: 'text', file: { filePath: '/workspace/x', content: 'x' } };
+  const file = spawnHook('file-output.mjs', JSON.stringify({ tool_name: 'Read', tool_response: read }));
+  assert.equal(file.status, 0, file.stderr);
+  assert.deepEqual(classifyRead(file.stdout, blockedMessage), { kind: 'error', name: 'MissingGuardrailConfig' });
 });
 
 test('output it cannot read is an error of its own, never a detection', () => {
@@ -442,8 +471,22 @@ test('errors fail the run except in size probes, where only unreadable output do
   assert.deepEqual(gateFailures([run(positive, error), run(probe, error), run(negative, {})]), ['csv/x-001']);
   assert.deepEqual(gateFailures([run(probe, { outcome: 'error', errorName: UNRECOGNIZED_OUTPUT })]), ['large/x-001']);
   assert.deepEqual(gateFailures([run(positive, {}, { outcome: 'error', errorName: 'X' })]), ['csv/x-001']);
+  assert.deepEqual(gateFailures([{ ...run(positive, {}), file: { ...run(positive, error).output } }]), ['csv/x-001']);
   assert.equal(runFailed([]), true, 'a run that scanned nothing fails');
   assert.equal(runFailed([run(probe, error)]), false);
+});
+
+test('the file surface is scored like the output surface, and differences are counted', () => {
+  const same = { ...run(positive, { leaked: [1] }), file: run(positive, { leaked: [1] }).output };
+  const leakedMore = { ...run(positive, { leaked: [1] }), file: run(positive, { leaked: [0, 1] }).output };
+  const withheld = { ...run(negative, { outcome: 'unchanged' }), file: run(negative, { outcome: 'withheld' }).output };
+  const runs = [same, leakedMore, withheld, run(negative, {})];
+  assert.deepEqual(
+    fileSurface(runs).map(({ output }) => output),
+    [same.file, leakedMore.file, withheld.file],
+  );
+  assert.equal(surfaceDifferences(runs), 2);
+  assert.equal(summarizeOutput(fileSurface(runs)).withheld, 1);
 });
 
 // --- report rows ---
@@ -550,13 +593,16 @@ test('the default target and the hook environment come from the PHI_GUARD_ names
 });
 
 test('hook specs come from hooks/hooks.json and point at the shipped bundles', () => {
-  const output = hookSpec('PostToolUse');
+  const output = hookSpec('PostToolUse', 'Bash');
+  const file = hookSpec('PostToolUse', 'Read|Grep');
   const prompt = hookSpec('UserPromptSubmit');
   assert.equal(output.command, 'node');
   assert.match(output.args[0], /\/dist\/bash-output\.mjs$/);
+  assert.match(file.args[0], /\/dist\/file-output\.mjs$/);
   assert.match(prompt.args[0], /\/dist\/prompt\.mjs$/);
-  assert.ok(existsSync(output.args[0]) && existsSync(prompt.args[0]));
-  assert.deepEqual([output.timeoutMs, prompt.timeoutMs], [20_000, 20_000]);
+  assert.ok([output, file, prompt].every(({ args }) => existsSync(args[0])));
+  assert.deepEqual([output.timeoutMs, file.timeoutMs, prompt.timeoutMs], [20_000, 20_000, 20_000]);
+  assert.throws(() => hookSpec('PostToolUse', 'Edit'), /no PostToolUse entry with matcher Edit/);
 });
 
 test('pnpm eval --list prints ids, formats and categories without scanning or showing text', () => {

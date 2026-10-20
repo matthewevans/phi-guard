@@ -2,9 +2,11 @@
 // text or planted values.
 import { PROMPT_FORMATS, type Planted } from './case.ts';
 import {
+  fileSurface,
   gateFailures,
   summarizeOutput,
   summarizePrompt,
+  surfaceDifferences,
   textUnits,
   type Rate,
   type Run,
@@ -135,6 +137,7 @@ function failures(runs: readonly Run[]): string {
 
 export function formatReport(target: string, runs: readonly Run[]): string {
   const output = summarizeOutput(runs);
+  const file = summarizeOutput(fileSurface(runs));
   const prompt = summarizePrompt(runs);
   return [
     `Target ${target}`,
@@ -156,6 +159,13 @@ export function formatReport(target: string, runs: readonly Run[]): string {
     section(
       'Size probes',
       table(['case', 'characters', 'text units', 'outcome', 'leaked values', 'ms'], sizeProbeRows(runs)),
+    ),
+    section(
+      'File surface (dist/file-output.mjs, each case as a Read result)',
+      overview(file, [
+        ['withheld by guardrail', String(file.withheld)],
+        ['cases scored unlike the output surface', String(surfaceDifferences(runs))],
+      ]),
     ),
     section(
       `Prompt surface (dist/prompt.mjs, formats ${[...PROMPT_FORMATS].join(', ')})`,

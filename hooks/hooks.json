@@ -27,6 +27,19 @@
             "statusMessage": "phi-guard: scanning output"
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/file-output.mjs"],
+            "timeout": 20,
+            "onFailure": "block",
+            "statusMessage": "phi-guard: scanning file contents"
+          }
+        ]
       }
     ]
   }

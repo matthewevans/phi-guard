@@ -52,6 +52,41 @@ test('Claude managed settings register and force-enable the plugin with matching
   assert.deepEqual(optionArgs.map(({ key }) => key).sort(), Object.keys(claudePlugin.userConfig).sort());
 });
 
+// Server-managed settings from an org login replace the managed file, so every claude start
+// goes through a wrapper that loads the plugin and its options from the command line too.
+test('the claude on PATH is the wrapper, which loads the plugin from the command line', () => {
+  const cli = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe';
+  assert.ok(dockerfile.includes(`RUN test -x ${cli} && rm /usr/local/bin/claude\n`));
+  assert.match(dockerfile, /^COPY \.devcontainer\/claude\.sh \/usr\/local\/bin\/claude$/m);
+  assert.match(dockerfile, /^RUN chmod 0755 \/usr\/local\/bin\/claude$/m);
+  assert.ok(
+    read('.devcontainer/claude.sh').includes(
+      `exec ${cli} \\\n  --plugin-dir ${PLUGIN_DIR} --settings ${PLUGIN_DIR}/claude-settings.json "$@"\n`,
+    ),
+  );
+});
+
+test("the wrapper's settings carry the managed options under the inline plugin id, plus the env, permissions and status line", () => {
+  const filter = /^RUN jq '(.+)' \\$/m.exec(dockerfile)?.[1];
+  assert.ok(filter, 'the Dockerfile builds claude-settings.json with jq');
+  assert.match(dockerfile, new RegExp(`\\n  ${SETTINGS} > ${PLUGIN_DIR}/claude-settings\\.json\\n`));
+  const options = { guardrail_id: 'g', guardrail_version: '1', aws_region: 'us-east-1', aws_profile: 'p' };
+  const managed = { ...claudeSettings, pluginConfigs: { [pluginId]: { options } } };
+  const flags = JSON.parse(execFileSync('jq', [filter], { input: JSON.stringify(managed), encoding: 'utf8' }));
+  assert.deepEqual(flags, {
+    env: claudeSettings.env,
+    permissions: claudeSettings.permissions,
+    statusLine: claudeSettings.statusLine,
+    pluginConfigs: { [`${claudePlugin.name}@inline`]: { options } },
+  });
+});
+
+test('the image ships the health check bin/nophi runs', () => {
+  assert.match(dockerfile, /^COPY .*\.devcontainer\/health-check\.sh \/opt\/phi-guard\/$/m);
+  assert.match(dockerfile, /^RUN chmod 0755 .*\/opt\/phi-guard\/health-check\.sh/m);
+  assert.ok(read('bin/nophi').includes(`bash ${PLUGIN_DIR}/health-check.sh "$cmd"`));
+});
+
 test('Claude managed settings lock down bypass, MCP and non-managed hooks', () => {
   assert.equal(claudeSettings.permissions.disableBypassPermissionsMode, 'disable');
   assert.equal(claudeSettings.allowManagedMcpServersOnly, true);

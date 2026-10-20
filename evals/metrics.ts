@@ -14,6 +14,8 @@ const WILSON_Z_95 = 1.96;
 export interface Run {
   testCase: Case;
   output: OutputResult;
+  /** The same text as a Read result, through dist/file-output.mjs. */
+  file?: OutputResult;
   prompt?: PromptResult;
 }
 
@@ -131,6 +133,16 @@ export function summarizeOutput(
   };
 }
 
+/** The runs with their file-surface results in place of the output ones, for summarizeOutput. */
+export const fileSurface = (runs: readonly Run[]): Run[] =>
+  runs.flatMap((run) => (run.file ? [{ ...run, output: run.file }] : []));
+
+/** Cases the file surface scored differently from the same text as command output. */
+export const surfaceDifferences = (runs: readonly Run[]) =>
+  runs.filter(
+    ({ output, file }) => file && (file.outcome !== output.outcome || file.leaked.join() !== output.leaked.join()),
+  ).length;
+
 type PromptRun = Run & { prompt: PromptResult };
 const hasPrompt = (run: Run): run is PromptRun => run.prompt !== undefined;
 
@@ -158,13 +170,13 @@ export function summarizePrompt(
 }
 
 /**
- * Ids of cases that should fail the run: an error on either surface outside the size
+ * Ids of cases that should fail the run: an error on any surface outside the size
  * probes (their over-quota errors are the measurement), or any hook output the evals could not read.
  */
 export function gateFailures(runs: readonly Run[]): string[] {
   return runs
-    .filter(({ testCase, output, prompt }) =>
-      [output, prompt].some(
+    .filter(({ testCase, output, file, prompt }) =>
+      [output, file, prompt].some(
         (result) =>
           result?.outcome === 'error' && (testCase.format !== 'large' || result.errorName === UNRECOGNIZED_OUTPUT),
       ),

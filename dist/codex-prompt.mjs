@@ -1209,14 +1209,14 @@ var init_TypeRegistry = __esm({
         if (!this.schemas.has(id)) {
           if (!shapeId.includes("#")) {
             const suffix = "#" + shapeId;
-            const candidates = [];
+            const candidates2 = [];
             for (const [shapeId2, schema] of this.schemas.entries()) {
               if (shapeId2.endsWith(suffix)) {
-                candidates.push(schema);
+                candidates2.push(schema);
               }
             }
-            if (candidates.length === 1) {
-              return candidates[0];
+            if (candidates2.length === 1) {
+              return candidates2[0];
             }
           }
           throw new Error(`@smithy/core/schema - schema not found for ${id}`);
@@ -3316,7 +3316,7 @@ var init_getInstanceMetadataRegion = __esm({
     };
     imdsRequest = async (options) => {
       const { request } = await import("node:http");
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve2, reject) => {
         const req = request({
           hostname: options.hostname,
           port: options.port,
@@ -3344,7 +3344,7 @@ var init_getInstanceMetadataRegion = __esm({
           const chunks = [];
           res.on("data", (chunk) => chunks.push(chunk));
           res.on("end", () => {
-            resolve(Buffer.concat(chunks));
+            resolve2(Buffer.concat(chunks));
             req.destroy();
           });
         });
@@ -4780,7 +4780,7 @@ var init_stream_collector = __esm({
       if (isReadableStream(stream)) {
         return collectReadableStream(stream);
       }
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve2, reject) => {
         const collector = new Collector();
         const nodeStream = stream;
         nodeStream.pipe(collector);
@@ -4791,7 +4791,7 @@ var init_stream_collector = __esm({
         collector.on("error", reject);
         collector.on("finish", function() {
           const bytes = concatBytes(this.bufferedBytes);
-          resolve(bytes);
+          resolve2(bytes);
         });
       });
     };
@@ -5940,7 +5940,7 @@ async function* readableToIterable(readStream) {
     streamEnded = true;
   });
   while (!generationEnded) {
-    const value = await new Promise((resolve) => setTimeout(() => resolve(records.shift()), 0));
+    const value = await new Promise((resolve2) => setTimeout(() => resolve2(records.shift()), 0));
     if (value) {
       yield value;
     }
@@ -7542,7 +7542,7 @@ var init_retryMiddleware = __esm({
     init_constants4();
     init_parseRetryAfterHeader();
     init_util();
-    cooldown = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    cooldown = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
     isRetryStrategyV2 = (retryStrategy) => typeof retryStrategy.acquireInitialRetryToken !== "undefined" && typeof retryStrategy.refreshRetryTokenForRetry !== "undefined" && typeof retryStrategy.recordSuccess !== "undefined";
     getRetryErrorInfo = (error, logger2) => {
       const errorInfo = {
@@ -7640,7 +7640,7 @@ var init_DefaultRateLimiter = __esm({
         this.refillTokenBucket();
         while (amount > this.availableTokens) {
           const delay = (amount - this.availableTokens) / this.fillRate * 1e3;
-          await new Promise((resolve) => _DefaultRateLimiter.setTimeoutFn(resolve, delay));
+          await new Promise((resolve2) => _DefaultRateLimiter.setTimeoutFn(resolve2, delay));
           this.refillTokenBucket();
         }
         this.availableTokens = this.availableTokens - amount;
@@ -10580,7 +10580,7 @@ var init_node_http = __esm({
 
 // node_modules/.pnpm/@smithy+credential-provider-imds@4.5.2/node_modules/@smithy/credential-provider-imds/dist-es/remoteProvider/httpRequest.js
 function httpRequest(options) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     const req = node_http.request({
       method: "GET",
       ...options,
@@ -10605,7 +10605,7 @@ function httpRequest(options) {
         chunks.push(chunk);
       });
       res.on("end", () => {
-        resolve(Buffer.concat(chunks));
+        resolve2(Buffer.concat(chunks));
         req.destroy();
       });
     });
@@ -11223,21 +11223,21 @@ async function writeRequestBody(httpRequest2, request, maxContinueTimeoutMs = MI
   let sendBody = true;
   if (!externalAgent && expect === "100-continue") {
     sendBody = await Promise.race([
-      new Promise((resolve) => {
-        timeoutId = Number(timing.setTimeout(() => resolve(true), Math.max(MIN_WAIT_TIME, maxContinueTimeoutMs)));
+      new Promise((resolve2) => {
+        timeoutId = Number(timing.setTimeout(() => resolve2(true), Math.max(MIN_WAIT_TIME, maxContinueTimeoutMs)));
       }),
-      new Promise((resolve) => {
+      new Promise((resolve2) => {
         httpRequest2.on("continue", () => {
           timing.clearTimeout(timeoutId);
-          resolve(true);
+          resolve2(true);
         });
         httpRequest2.on("response", () => {
           timing.clearTimeout(timeoutId);
-          resolve(false);
+          resolve2(false);
         });
         httpRequest2.on("error", () => {
           timing.clearTimeout(timeoutId);
-          resolve(false);
+          resolve2(false);
         });
       })
     ]);
@@ -11336,13 +11336,13 @@ or increase socketAcquisitionWarningTimeout=(millis) in the NodeHttpHandler conf
         return socketWarningTimestamp;
       }
       constructor(options) {
-        this.configProvider = new Promise((resolve, reject) => {
+        this.configProvider = new Promise((resolve2, reject) => {
           if (typeof options === "function") {
             options().then((_options) => {
-              resolve(this.resolveDefaultConfig(_options));
+              resolve2(this.resolveDefaultConfig(_options));
             }).catch(reject);
           } else {
-            resolve(this.resolveDefaultConfig(options));
+            resolve2(this.resolveDefaultConfig(options));
           }
         });
       }
@@ -11374,7 +11374,7 @@ or increase socketAcquisitionWarningTimeout=(millis) in the NodeHttpHandler conf
             timing.clearTimeout(socketTimeoutId);
             timing.clearTimeout(keepAliveTimeoutId);
           };
-          const resolve = async (arg) => {
+          const resolve2 = async (arg) => {
             await writeRequestBodyPromise;
             clearTimeouts();
             _resolve(arg);
@@ -11438,7 +11438,7 @@ or increase socketAcquisitionWarningTimeout=(millis) in the NodeHttpHandler conf
               headers: getTransformedHeaders(res.headers),
               body: res
             });
-            resolve({ response: httpResponse });
+            resolve2({ response: httpResponse });
           });
           req.on("error", (err) => {
             if (NODEJS_TIMEOUT_ERROR_CODES2.includes(err.code)) {
@@ -11811,13 +11811,13 @@ var init_node_http2_handler = __esm({
         return new _NodeHttp2Handler(instanceOrOptions);
       }
       constructor(options) {
-        this.configProvider = new Promise((resolve, reject) => {
+        this.configProvider = new Promise((resolve2, reject) => {
           if (typeof options === "function") {
             options().then((opts) => {
-              resolve(opts || {});
+              resolve2(opts || {});
             }).catch(reject);
           } else {
-            resolve(options || {});
+            resolve2(options || {});
           }
         });
       }
@@ -11842,7 +11842,7 @@ var init_node_http2_handler = __esm({
         return new Promise((_resolve, _reject) => {
           let fulfilled = false;
           let writeRequestBodyPromise = void 0;
-          const resolve = async (arg) => {
+          const resolve2 = async (arg) => {
             await writeRequestBodyPromise;
             _resolve(arg);
           };
@@ -11927,7 +11927,7 @@ var init_node_http2_handler = __esm({
               body: clientHttp2Stream
             });
             fulfilled = true;
-            resolve({ response: httpResponse });
+            resolve2({ response: httpResponse });
             if (useIsolatedSession) {
               session.close();
               clientHttp2Stream.on("end", () => {
@@ -12078,7 +12078,7 @@ var init_retry_wrapper = __esm({
           try {
             return await toRetry();
           } catch (e6) {
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            await new Promise((resolve2) => setTimeout(resolve2, delayMs));
           }
         }
         return await toRetry();
@@ -20081,8 +20081,8 @@ var EventStreamPayloadHandler = class {
       credentials: this.credentials
     });
     let resolvePipeline;
-    const pipelineError = new Promise((resolve, reject) => {
-      resolvePipeline = () => resolve(void 0);
+    const pipelineError = new Promise((resolve2, reject) => {
+      resolvePipeline = () => resolve2(void 0);
       pipeline(payload, signingStream, request.body, (err) => {
         if (err) {
           reject(new Error(`Pipeline error in @aws-sdk/eventstream-handler-node: ${err.message}`, { cause: err }));
@@ -23307,21 +23307,58 @@ function scannerFromConfig(prefix) {
 }
 
 // src/hooks/prompt.ts
-async function checkPrompt(prompt, scan) {
-  const result = await scan(prompt, "INPUT");
-  if (!result.intervened) return void 0;
+async function checkPrompt(prompt, scan, attachments = []) {
+  const sources = [
+    { where: "the prompt", text: prompt },
+    ...attachments.map((a6) => ({ where: `@${a6.mention}`, text: a6.text }))
+  ];
+  const results = await Promise.all(sources.map(({ text }) => scan(text, "INPUT")));
+  const flagged = sources.filter((_, index) => results[index].intervened);
+  if (flagged.length === 0) return void 0;
+  const findings = [...new Set(results.flatMap((result) => result.findings))];
+  const where = flagged.length === 1 && flagged[0] === sources[0] ? "" : ` in ${flagged.map((s2) => s2.where).join(", ")}`;
   return {
     decision: "block",
-    reason: `phi-guard blocked this prompt: possible ${describeFindings(result.findings)}. Remove it and resubmit.`
+    reason: `phi-guard blocked this prompt: possible ${describeFindings(findings)}${where}. Remove it and resubmit.`
   };
 }
 
+// src/mentions.ts
+import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { resolve } from "node:path";
+var MENTION = /(?:^|\s)@(?:"([^"]+)"|(\S+))/g;
+var MAX_BYTES = 1e6;
+var withoutRange = (path) => path.replace(/#L\d+(?:-\d+)?$/, "");
+var candidates = (raw) => [withoutRange(raw), withoutRange(raw.replace(/[.,;:!?)\]}'"]+$/, ""))];
+var resolveFrom = (cwd, path) => path === "~" || path.startsWith("~/") ? resolve(homedir3(), path.slice(2)) : resolve(cwd, path);
+function readMentions(prompt, cwd) {
+  const seen = /* @__PURE__ */ new Set();
+  const attachments = [];
+  for (const match of prompt.matchAll(MENTION)) {
+    for (const mention of candidates(match[1] ?? match[2])) {
+      const path = resolveFrom(cwd, mention);
+      const stat = statSync(path, { throwIfNoEntry: false });
+      if (!stat) continue;
+      if (stat.isFile() && !seen.has(path)) {
+        seen.add(path);
+        if (stat.size > MAX_BYTES) throw namedError("AttachmentTooLarge", "an @-mentioned file is over the scan limit");
+        const contents = readFileSync2(path);
+        if (contents.includes(0)) throw namedError("UnscannableAttachment", "an @-mentioned file is not text");
+        if (contents.length > 0) attachments.push({ mention, text: contents.toString("utf8") });
+      }
+      break;
+    }
+  }
+  return attachments;
+}
+
 // src/prompt-hook.ts
-async function runPromptHook(prefix) {
+async function runPromptHook(prefix, { mentions = false } = {}) {
   try {
     return await withDeadline(async () => {
-      const { prompt } = await json(process.stdin);
-      return checkPrompt(prompt, scannerFromConfig(prefix));
+      const { prompt, cwd } = await json(process.stdin);
+      return checkPrompt(prompt, scannerFromConfig(prefix), mentions ? readMentions(prompt, cwd) : []);
     });
   } catch (error) {
     return {

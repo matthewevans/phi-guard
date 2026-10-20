@@ -8,7 +8,8 @@ The sandbox is the boundary: the container runs the agent on the repo you open i
 it (`nophi` mounts your working tree, so a fresh or shallow clone is the safest choice)
 with an egress firewall and your host `~/.aws` and `~/.npmrc` mounted read-only. The
 hooks are a safety net for human error. A prompt hook blocks prompts that contain
-PHI, and an output hook masks PHI in shell command output before the model sees it.
+PHI, and output hooks mask PHI in shell command output (and, in Claude Code, in files
+read with Read, Grep or an `@file` mention) before the model sees it.
 Both call Amazon Bedrock Guardrails `ApplyGuardrail` in your BAA-covered AWS account. When a scan fails for
 any reason the prompt is blocked or the output is withheld. That holds in
 phi-guard's own code. The hooks run as the same user as the agent, and
@@ -50,7 +51,8 @@ sandbox must allow writes to `/tmp` (workspace-write or danger-full-access). Wit
 
 Open the repo in the dev container (`.devcontainer/`). It installs both CLIs and
 the plugin, and enforces the hooks through managed settings for Claude Code and
-`requirements.toml` for Codex. Codex runs with `danger-full-access` because the
+`requirements.toml` for Codex. `claude` in the container is a wrapper that also loads
+phi-guard from the command line, so a Team or Enterprise login cannot drop it. Codex runs with `danger-full-access` because the
 container is its boundary. The guardrail values are not in the repo. Export
 `PHI_GUARD_GUARDRAIL_ID`, `PHI_GUARD_GUARDRAIL_VERSION` and `PHI_GUARD_AWS_REGION` in
 the host environment before the image is built, which fails with the names of any that
@@ -116,11 +118,14 @@ a data-like extension (`csv`, `tsv`, `xls`, `xlsx`, `parquet`, `avro`, `orc`,
 of them, and proceeds only when they are moved out or you pass
 `--i-checked-no-phi`. The [launcher section of
 ARCHITECTURE.md](docs/ARCHITECTURE.md#launcher) lists what the stop misses. After the
-container starts it sends one benign prompt through the Codex prompt hook to prove
-that the guardrail answers. If that fails, the usual
-cause is an expired AWS session: run `good-morning` on this machine. `nophi shell`
-and `nophi codex login` skip that check. Claude's first-run login comes after that check, so
-sign in once AWS works, or run `claude` from `nophi shell`.
+container starts, a health check sends a fake-PII canary prompt through the agent and
+starts it only if phi-guard blocks the canary before any model call. That proves the
+hooks are loaded under whatever account is signed in (an org login's managed settings
+can displace them, see [Org logins](docs/ARCHITECTURE.md#org-logins)) and that the
+guardrail answers. Codex runs the canary only when signed in, and otherwise checks the
+guardrail alone. If the check reports a scan error, the usual cause is an expired AWS
+session: run `good-morning` on this machine. `nophi shell` and `nophi codex login` skip
+the check. It works before Claude's first-run login.
 
 In a terminal, `nophi` marks the window while the agent runs and restores it on
 exit: the title reads `NO PHI · <repo>`, the background takes a dark red tint (light
@@ -160,9 +165,10 @@ sandbox signs in on its own login volumes, with any account.
    table. The profile defaults to `phi-guard`. As an alternative to adding a
    `[profile phi-guard]` entry, set `PHI_GUARD_AWS_PROFILE` to the work profile that can
    call `bedrock:ApplyGuardrail` (set but empty selects the default credential chain).
-4. Run `pnpm e2e`. With the variables exported it adds four scenarios against the real
-   guardrail: LC1 and LX1 (a fake-PII prompt is blocked) and LC2 and LX2 (`cat` of a
-   fake-PII file is masked), two of them cheap-model calls. The isolation flags drop
+4. Run `pnpm e2e`. With the variables exported it adds six scenarios against the real
+   guardrail: LC1 and LX1 (a fake-PII prompt is blocked), LC2 and LX2 (`cat` of a
+   fake-PII file is masked), LC3 (Claude's Read of that file is masked) and LC4 (a prompt
+   that `@`-mentions it is blocked), three of them cheap-model calls. The isolation flags drop
    user-level settings. If your company login lives there (an `apiKeyHelper`, an `env`
    block with `CLAUDE_CODE_USE_BEDROCK`, a custom Codex `model_provider`), the scenarios
    that call the model fail while LC1 and LX1 still work. If enterprise managed settings
@@ -172,8 +178,9 @@ sandbox signs in on its own login volumes, with any account.
    the Codex scenario that proves the real guardrail answered.
 5. In some other repo, run the phi-guard checkout's launcher, for example
    `~/dev/phi-guard/bin/nophi --rebuild claude`, then `~/dev/phi-guard/bin/nophi codex`. Look for
-   the NO PHI markers, a prompt containing a fake name and email being blocked, and
-   `cat` of a file holding them coming back masked.
+   the NO PHI markers, a prompt containing a fake name and email being blocked, the same
+   for a prompt that `@`-mentions a file holding them, and that file coming back masked
+   when Claude reads it, greps it or runs `cat` on it.
 
 ## Development
 
@@ -194,15 +201,15 @@ installed `claude` and `codex` CLIs, with about five cheap-model calls in total.
 Its main scenarios use a bogus guardrail, so the expected outcomes are the fail-closed
 ones: prompts blocked, outputs withheld, and the masking paths proven with a
 test-only fake scanner. With the guardrail variables exported (see
-[Testing on a work machine](#testing-on-a-work-machine)) four more scenarios run
+[Testing on a work machine](#testing-on-a-work-machine)) six more scenarios run
 against the real guardrail. `scripts/e2e.sh` lists each scenario and its expected result.
 
 ## Evals
 
 `pnpm eval` runs a labelled synthetic corpus through the shipped Claude hooks and a real
 guardrail, and reports recall, false positives, scan errors, hook latency, text units and
-estimated cost. It spawns `dist/bash-output.mjs` and `dist/prompt.mjs` as `hooks/hooks.json`
-registers them, makes no model calls, and costs only the Guardrails text units; the
+estimated cost. It spawns `dist/bash-output.mjs`, `dist/file-output.mjs` (each case as a Read
+result) and `dist/prompt.mjs` as `hooks/hooks.json` registers them, makes no model calls, and costs only the Guardrails text units; the
 report prints the units and the estimate.
 
 ```

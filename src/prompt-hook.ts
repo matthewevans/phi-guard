@@ -4,12 +4,14 @@ import { failureName } from './errors.ts';
 import { scannerFromConfig } from './guardrail.ts';
 import { withDeadline } from './hook-io.ts';
 import { checkPrompt, type BlockDecision } from './hooks/prompt.ts';
+import { readMentions } from './mentions.ts';
 
-export async function runPromptHook(prefix: string): Promise<BlockDecision | undefined> {
+/** `mentions` scans the files the prompt @-mentions, which only Claude Code attaches. */
+export async function runPromptHook(prefix: string, { mentions = false } = {}): Promise<BlockDecision | undefined> {
   try {
     return await withDeadline(async () => {
-      const { prompt } = (await json(process.stdin)) as { prompt: string };
-      return checkPrompt(prompt, scannerFromConfig(prefix));
+      const { prompt, cwd } = (await json(process.stdin)) as { prompt: string; cwd: string };
+      return checkPrompt(prompt, scannerFromConfig(prefix), mentions ? readMentions(prompt, cwd) : []);
     });
   } catch (error) {
     return {

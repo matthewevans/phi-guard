@@ -1,11 +1,11 @@
 // Scores one case against what a hook did with it. The results hold indexes, type names
 // and timings only, never the case text or a planted value, so they are safe to persist.
 import type { Case } from './case.ts';
-import type { BashOutcome, PromptOutcome } from './classify.ts';
+import type { OutputOutcome, PromptOutcome } from './classify.ts';
 import { expectedTypes } from './taxonomy.ts';
 
 export interface OutputResult {
-  outcome: BashOutcome['kind'];
+  outcome: OutputOutcome['kind'];
   /** Set when the outcome is an error. */
   errorName?: string;
   /** Finding types the hook reported. */
@@ -34,7 +34,7 @@ function maskTags(original: string, masked: string): string[] {
   return [...tagsIn(masked)].filter((tag) => !before.has(tag));
 }
 
-export function scoreOutput(testCase: Case, outcome: BashOutcome, ms: number): OutputResult {
+export function scoreOutput(testCase: Case, outcome: OutputOutcome, ms: number): OutputResult {
   const result: OutputResult = { outcome: outcome.kind, types: [], tags: [], leaked: [], ms };
   if (outcome.kind === 'error') result.errorName = outcome.name;
   if (outcome.kind === 'masked') {

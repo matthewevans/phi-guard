@@ -3,7 +3,7 @@
 
 export const UNRECOGNIZED_OUTPUT = 'UnrecognizedHookOutput';
 
-export type BashOutcome =
+export type OutputOutcome =
   | { kind: 'unchanged' }
   | { kind: 'masked'; text: string; types: string[] }
   /** The guardrail replaced the output with its BlockedOutputsMessaging. */
@@ -22,8 +22,12 @@ const COULD_NOT_SCAN = /^phi-guard could not scan this prompt \((\w+)\), so it w
 // The hooks print "sensitive data" when the guardrail intervened without naming a type.
 const typesIn = (listed: string) => (listed === 'sensitive data' ? [] : listed.split(', '));
 
-interface BashHookOutput {
-  hookSpecificOutput?: { updatedToolOutput?: { stdout?: unknown }; additionalContext?: unknown };
+interface Replacement {
+  stdout?: unknown;
+  file?: { content?: unknown };
+}
+interface OutputHookOutput {
+  hookSpecificOutput?: { updatedToolOutput?: Replacement; additionalContext?: unknown };
 }
 
 function parse<T>(stdout: string): T | undefined {
@@ -34,10 +38,14 @@ function parse<T>(stdout: string): T | undefined {
   }
 }
 
-export function classifyBash(stdout: string, blockedOutputsMessaging: string): BashOutcome {
+function classifyOutput(
+  stdout: string,
+  blockedOutputsMessaging: string,
+  textOf: (replacement: Replacement) => unknown,
+): OutputOutcome {
   if (stdout === '') return { kind: 'unchanged' };
-  const output = parse<BashHookOutput>(stdout)?.hookSpecificOutput;
-  const text = output?.updatedToolOutput?.stdout;
+  const output = parse<OutputHookOutput>(stdout)?.hookSpecificOutput;
+  const text = output?.updatedToolOutput && textOf(output.updatedToolOutput);
   if (typeof text !== 'string') return unrecognized;
 
   const failed = SCAN_FAILED.exec(text);
@@ -47,6 +55,14 @@ export function classifyBash(stdout: string, blockedOutputsMessaging: string): B
   const masked = typeof context === 'string' ? MASKED.exec(context) : null;
   return masked ? { kind: 'masked', text, types: typesIn(masked[1]) } : unrecognized;
 }
+
+/** What dist/bash-output.mjs did with a command's stdout. */
+export const classifyBash = (stdout: string, blockedOutputsMessaging: string) =>
+  classifyOutput(stdout, blockedOutputsMessaging, ({ stdout }) => stdout);
+
+/** What dist/file-output.mjs did with a Read result's file content. */
+export const classifyRead = (stdout: string, blockedOutputsMessaging: string) =>
+  classifyOutput(stdout, blockedOutputsMessaging, ({ file }) => file?.content);
 
 export function classifyPrompt(stdout: string): PromptOutcome {
   if (stdout === '') return { kind: 'passed' };

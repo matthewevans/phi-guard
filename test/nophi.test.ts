@@ -20,8 +20,7 @@ import { fileURLToPath } from 'node:url';
 const nophi = fileURLToPath(new URL('../bin/nophi', import.meta.url));
 const payload = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
 const config = join(payload, '.devcontainer/devcontainer.json');
-const HEALTH_SCRIPT = 'printf %s "$1" | node /opt/phi-guard/dist/codex-prompt.mjs | jq -r .reason';
-const HEALTH_INPUT = '{"prompt":"nophi health check"}';
+const health = (agent: string) => `[bash] [/opt/phi-guard/health-check.sh] [${agent}]`;
 
 // Each stub appends "name [arg] [arg]" to $STUB_LOG, so an empty argument is visible.
 // The STUB_* variables steer the answers: STUB_DOCKER_DOWN fails `docker info`, STUB_IDS is
@@ -164,7 +163,7 @@ test('claude runs up, the health check and the agent in order, passing its args 
   assert.deepEqual(result.calls, [
     'docker [info]',
     `devcontainer [up] ${dc(result.repo)}`,
-    `devcontainer [exec] ${dc(result.repo)} [bash] [-o] [pipefail] [-c] [${HEALTH_SCRIPT}] [_] [${HEALTH_INPUT}]`,
+    `devcontainer [exec] ${dc(result.repo)} ${health('claude')}`,
     `devcontainer [exec] ${dc(result.repo)} [--remote-env] [CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1] [claude] ` +
       '[--model] [sonnet] [-p] [hi there]',
   ]);
@@ -174,6 +173,7 @@ test('--rebuild recreates the container', () => {
   const result = launch(['--rebuild', 'codex']);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.calls[1], `devcontainer [up] ${dc(result.repo)} [--remove-existing-container]`);
+  assert.equal(result.calls[2], `devcontainer [exec] ${dc(result.repo)} ${health('codex')}`);
   assert.match(result.calls[3], /\[codex\]$/);
 });
 

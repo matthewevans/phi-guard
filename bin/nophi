@@ -99,17 +99,14 @@ if ! "${up[@]}" >"$log" 2>&1; then
 fi
 rm -f "$log"
 
-# Codex logins need no AWS, so they skip the guardrail check.
+# The check prints nothing when phi-guard is enforcing, else the reason (see
+# .devcontainer/health-check.sh). For Claude it sends a fake-PII canary through the real
+# CLI, so a login whose org settings drop the plugin stops here. Codex logins need no AWS.
 if [ "$cmd" != shell ] && ! { [ "$cmd" = codex ] && [ "${1:-}" = login ]; }; then
   status=0
-  # The hook prints nothing when the guardrail answers, else a block decision whose reason is
-  # printed here. pipefail keeps a crashed hook from reading as a pass.
-  # shellcheck disable=SC2016 # $1 expands inside the container
-  out=$(devcontainer exec "${dc[@]}" bash -o pipefail -c \
-    'printf %s "$1" | node /opt/phi-guard/dist/codex-prompt.mjs | jq -r .reason' _ \
-    '{"prompt":"nophi health check"}' </dev/null 2>/dev/null) || status=$?
+  out=$(devcontainer exec "${dc[@]}" bash /opt/phi-guard/health-check.sh "$cmd" </dev/null 2>/dev/null) || status=$?
   if [ "$status" != 0 ] || [ -n "$out" ]; then
-    echo "nophi: the guardrail health check failed: ${out:-exit status $status}" >&2
+    echo "nophi: the phi-guard health check failed: ${out:-exit status $status}" >&2
     die "if this is a credentials error, run good-morning on this machine"
   fi
 fi

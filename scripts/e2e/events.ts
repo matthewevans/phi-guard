@@ -2,6 +2,7 @@
 //
 //   events.ts answer     claude|codex <file>  the run's final answer text
 //   events.ts model-text claude <file>        text the model itself produced
+//   events.ts tools      claude <file>        names of the tools the model called, one per line
 //   events.ts tokens     claude|codex <file>  total input + output tokens, "none" if the run never finished
 //
 // claude files hold `--output-format stream-json --verbose` lines, codex files `--json` lines.
@@ -15,7 +16,7 @@ interface Event {
   type?: string;
   result?: string;
   usage?: Usage;
-  message?: { content?: { type: string; text?: string }[] };
+  message?: { content?: { type: string; text?: string; name?: string }[] };
   item?: { type?: string; text?: string };
 }
 
@@ -41,6 +42,14 @@ if (command === 'answer') {
 } else if (command === 'model-text') {
   const blocks = events.filter((e) => e.type === 'assistant').flatMap((e) => e.message?.content ?? []);
   console.log(blocks.map((block) => block.text ?? '').join('\n'));
+} else if (command === 'tools') {
+  const blocks = events.filter((e) => e.type === 'assistant').flatMap((e) => e.message?.content ?? []);
+  console.log(
+    blocks
+      .filter((block) => block.type === 'tool_use')
+      .map((block) => block.name)
+      .join('\n'),
+  );
 } else if (command === 'tokens') {
   const finals = events.filter((e) => e.type === (agent === 'claude' ? 'result' : 'turn.completed') && e.usage);
   console.log(finals.length === 0 ? 'none' : finals.reduce((sum, e) => sum + total(e.usage!), 0));
