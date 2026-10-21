@@ -7,7 +7,9 @@ class Nophi < Formula
   url "https://github.com/matthewevans/phi-guard.git", tag: "v0.1.0"
   license :cannot_represent
 
+  depends_on "awscli"
   depends_on "devcontainer"
+  depends_on "jq"
 
   def install
     libexec.install "bin", ".devcontainer", ".claude-plugin", ".codex-plugin", "hooks", "dist"
@@ -16,12 +18,13 @@ class Nophi < Formula
 
   def caveats
     <<~EOS
-      nophi needs Docker running. The sandbox mounts your ~/.aws read-only and its hooks
-      call Bedrock with the "phi-guard" AWS profile, so add a [profile phi-guard] entry
-      to ~/.aws/config whose role allows bedrock:ApplyGuardrail.
+      nophi needs Docker running. On every launch it mints a one-session credential on
+      this machine from the AWS profile named by PHI_GUARD_AWS_PROFILE (default
+      phi-guard) and mounts only that into the sandbox. Point the profile at a role
+      whose only permission is ApplyGuardrailPolicy from infra/guardrail.yaml.
 
       Before the first run, export PHI_GUARD_GUARDRAIL_ID, PHI_GUARD_GUARDRAIL_VERSION
-      and PHI_GUARD_AWS_REGION (PHI_GUARD_AWS_PROFILE defaults to phi-guard).
+      and PHI_GUARD_AWS_REGION.
     EOS
   end
 

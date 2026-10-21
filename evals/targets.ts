@@ -1,7 +1,7 @@
 // Which guardrail to scan with. Region and profile come from the names the sandbox and
 // scripts/e2e.sh use, and reach the hooks as the plugin options Claude Code would set.
 
-// The profile the sandbox and the nophi launcher use when none is exported.
+// The profile the nophi launcher exports from when none is set.
 const DEFAULT_PROFILE = 'phi-guard';
 
 export interface Target {

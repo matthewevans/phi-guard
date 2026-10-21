@@ -2,8 +2,8 @@
 // startup, so a typo would silently drop phi-guard. These checks keep it in step with
 // the shipped plugin manifests and hooks files.
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -36,6 +36,9 @@ const devcontainer = JSON.parse(read('.devcontainer/devcontainer.json').replace(
 const dockerfile = read('.devcontainer/Dockerfile');
 // The image build adds the pluginConfigs options to the managed settings: one jq --arg
 // per option, whose value is the build arg (and Codex env var) of the same name.
+// `aws_profile` stays a plugin userConfig key for host installs, but the sandbox sets no
+// profile: its hooks use the default credential chain over the mounted credentials file.
+const sandboxOptionKeys = Object.keys(claudePlugin.userConfig).filter((key) => key !== 'aws_profile');
 const optionArgs = [...dockerfile.matchAll(/--arg (\w+) "\$(PHI_GUARD_\w+)"/g)].map((match) => ({
   key: match[1],
   variable: match[2],
@@ -49,7 +52,7 @@ test('Claude managed settings register and force-enable the plugin with matching
   assert.equal(claudeSettings.enabledPlugins[pluginId], true);
   assert.equal(claudeSettings.pluginConfigs, undefined, 'the image build adds the options');
   assert.ok(dockerfile.includes(`'.pluginConfigs["${pluginId}"].options = $ARGS.named'`));
-  assert.deepEqual(optionArgs.map(({ key }) => key).sort(), Object.keys(claudePlugin.userConfig).sort());
+  assert.deepEqual(optionArgs.map(({ key }) => key).sort(), sandboxOptionKeys.sort());
 });
 
 // Server-managed settings from an org login replace the managed file, so every claude start
@@ -70,7 +73,7 @@ test("the wrapper's settings carry the managed options under the inline plugin i
   const filter = /^RUN jq '(.+)' \\$/m.exec(dockerfile)?.[1];
   assert.ok(filter, 'the Dockerfile builds claude-settings.json with jq');
   assert.match(dockerfile, new RegExp(`\\n  ${SETTINGS} > ${PLUGIN_DIR}/claude-settings\\.json\\n`));
-  const options = { guardrail_id: 'g', guardrail_version: '1', aws_region: 'us-east-1', aws_profile: 'p' };
+  const options = { guardrail_id: 'g', guardrail_version: '1', aws_region: 'us-east-1' };
   const managed = { ...claudeSettings, pluginConfigs: { [pluginId]: { options } } };
   const flags = JSON.parse(execFileSync('jq', [filter], { input: JSON.stringify(managed), encoding: 'utf8' }));
   assert.deepEqual(flags, {
@@ -81,10 +84,15 @@ test("the wrapper's settings carry the managed options under the inline plugin i
   });
 });
 
-test('the image ships the health check bin/nophi runs', () => {
-  assert.match(dockerfile, /^COPY .*\.devcontainer\/health-check\.sh \/opt\/phi-guard\/$/m);
-  assert.match(dockerfile, /^RUN chmod 0755 .*\/opt\/phi-guard\/health-check\.sh/m);
-  assert.ok(read('bin/nophi').includes(`bash ${PLUGIN_DIR}/health-check.sh "$cmd"`));
+test('the image ships the health check and the sync script that bin/nophi runs', () => {
+  for (const script of ['health-check', 'sync']) {
+    assert.match(dockerfile, new RegExp(`^COPY .*\\.devcontainer/${script}\\.sh .*/opt/phi-guard/$`, 'm'));
+    assert.match(dockerfile, new RegExp(`^RUN chmod 0755 .*/opt/phi-guard/${script}\\.sh`, 'm'));
+  }
+  const launcher = read('bin/nophi');
+  assert.ok(launcher.includes(`bash ${PLUGIN_DIR}/health-check.sh "$cmd"`));
+  assert.ok(launcher.includes(`bash ${PLUGIN_DIR}/sync.sh in "$ref"`));
+  assert.ok(launcher.includes(`bash ${PLUGIN_DIR}/sync.sh out`));
 });
 
 test('Claude managed settings lock down bypass, MCP and non-managed hooks', () => {
@@ -112,19 +120,13 @@ test('the Dockerfile refuses to build unless every required option has a value',
   for (const { key, variable } of optionArgs) assert.equal(variable, `PHI_GUARD_${key.toUpperCase()}`);
 });
 
-test('the host environment feeds the build args, and the AWS profile defaults to phi-guard', () => {
+test('the host environment feeds the three build args, and the image knows no AWS profile', () => {
   assert.deepEqual(
     Object.fromEntries(Object.entries(devcontainer.build.args).filter(([name]) => name.startsWith('PHI_GUARD_'))),
-    Object.fromEntries(
-      optionArgs.map(({ variable }) => [
-        variable,
-        variable === 'PHI_GUARD_AWS_PROFILE'
-          ? '${localEnv:PHI_GUARD_AWS_PROFILE:phi-guard}'
-          : `\${localEnv:${variable}}`,
-      ]),
-    ),
+    Object.fromEntries(optionArgs.map(({ variable }) => [variable, `\${localEnv:${variable}}`])),
   );
-  assert.match(dockerfile, /^ARG PHI_GUARD_AWS_PROFILE=phi-guard$/m);
+  assert.equal(optionArgs.length, 3);
+  assert.doesNotMatch(dockerfile, /AWS_PROFILE/);
 });
 
 test('the sandbox logins live in fixed named volumes shared by every repo, apart from the host config', () => {
@@ -154,8 +156,8 @@ test('the managed Claude status line is the root-owned script that says no PHI a
   const script = fileURLToPath(new URL('.devcontainer/statusline.sh', root));
   const run = (env: Record<string, string>) =>
     execFileSync(script, { encoding: 'utf8', input: '{}', env: { PATH: process.env.PATH, ...env } });
-  assert.equal(run({}), 'NO PHI · personal subscription sandbox · firewall: web\n');
-  assert.equal(run({ PHI_GUARD_FIREWALL: 'strict' }), 'NO PHI · personal subscription sandbox · firewall: strict\n');
+  assert.equal(run({}), 'NO PHI · personal subscription sandbox · firewall: strict\n');
+  assert.equal(run({ PHI_GUARD_FIREWALL: 'web' }), 'NO PHI · personal subscription sandbox · firewall: web\n');
 });
 
 test('both system rc files source the banner, which stays silent unless the shell is interactive', () => {
@@ -210,6 +212,11 @@ test('Codex defaults pick danger-full-access (the container is the boundary) and
   assert.deepEqual(Object.keys(managedConfig).sort(), ['approval_policy', 'sandbox_mode', 'tui']);
 });
 
+test('the image has a root-owned /etc/phi-guard for the firewall pin, which the script defaults to', () => {
+  assert.match(dockerfile, /^ {2}mkdir -p \/etc\/phi-guard && \\$/m);
+  assert.match(read('.devcontainer/init-firewall.sh'), /^PIN=\$\{FIREWALL_ARGS:-\/etc\/phi-guard\/firewall-args\}$/m);
+});
+
 test('the image pins both CLIs and copies exactly the plugin runtime files', () => {
   assert.match(dockerfile, /^ARG CLAUDE_CODE_VERSION=\d+\.\d+\.\d+$/m);
   assert.match(dockerfile, /^ARG CODEX_VERSION=\d+\.\d+\.\d+$/m);
@@ -218,8 +225,8 @@ test('the image pins both CLIs and copies exactly the plugin runtime files', () 
   assert.deepEqual(copied, ['.claude-plugin', '.codex-plugin', 'hooks', 'dist']);
 });
 
-test('PHI_GUARD_FIREWALL defaults to web, and only the value off skips the firewall script', () => {
-  assert.equal(devcontainer.containerEnv.PHI_GUARD_FIREWALL, '${localEnv:PHI_GUARD_FIREWALL:web}');
+test('PHI_GUARD_FIREWALL defaults to strict, and only the value off skips the firewall script', () => {
+  assert.equal(devcontainer.containerEnv.PHI_GUARD_FIREWALL, '${localEnv:PHI_GUARD_FIREWALL:strict}');
   assert.equal(devcontainer.containerEnv.PHI_GUARD_EXTRA_HOSTS, '${localEnv:PHI_GUARD_EXTRA_HOSTS:}');
 
   const stubs = mkdtempSync(join(tmpdir(), 'phi-guard-sudo-'));
@@ -250,7 +257,8 @@ test('PHI_GUARD_FIREWALL defaults to web, and only the value off skips the firew
 });
 
 // The firewall tests run the real script with every command that could touch the host network
-// replaced by a stub that records its call and answers like a healthy host.
+// replaced by a stub that records its call and answers like a healthy host. The script's two
+// test-only overrides point it at a fake resolv.conf and a pin file in the temp directory.
 const SETTINGS = '/etc/claude-code/managed-settings.d/phi-guard.json';
 
 const NETWORK_TOOLS = [
@@ -286,14 +294,36 @@ const NETWORK_STUBS: Record<(typeof NETWORK_TOOLS)[number], string> = {
   jq: 'cat >/dev/null\ncase "$1" in -er) echo us-east-2 ;; -r) echo 192.0.2.0/24 ;; esac',
 };
 
-const runFirewall = (args: string[], stubOverrides: Partial<typeof NETWORK_STUBS> = {}) => {
+// Two IPv4 resolvers among the lines the script must skip.
+const RESOLV_CONF = [
+  '# Generated by Docker Engine',
+  'search example.com',
+  'nameserver 192.0.2.53',
+  'nameserver 2001:db8::1',
+  'nameserver 198.51.100.7',
+  'options ndots:0',
+  '',
+].join('\n');
+const resolvers = ['192.0.2.53', '198.51.100.7'];
+
+type FirewallFiles = { pin?: string; resolv?: string };
+
+const runFirewall = (
+  args: string[],
+  stubOverrides: Partial<typeof NETWORK_STUBS> = {},
+  { pin, resolv = RESOLV_CONF }: FirewallFiles = {},
+) => {
   const dir = mkdtempSync(join(tmpdir(), 'phi-guard-iptables-'));
   try {
     const log = join(dir, 'calls');
     for (const [tool, body] of Object.entries({ ...NETWORK_STUBS, ...stubOverrides })) {
       writeFileSync(join(dir, tool), `#!/bin/sh\necho ${tool} "$*" >> "${log}"\n${body}\n`, { mode: 0o755 });
     }
-    const env = { PATH: `${dir}:${process.env.PATH}` };
+    const pinFile = join(dir, 'firewall-args');
+    const resolvFile = join(dir, 'resolv.conf');
+    if (pin !== undefined) writeFileSync(pinFile, pin);
+    writeFileSync(resolvFile, resolv);
+    const env = { PATH: `${dir}:${process.env.PATH}`, FIREWALL_ARGS: pinFile, RESOLV_CONF: resolvFile };
     const resolved = execFileSync('bash', ['-c', 'command -v "$@"', 'bash', ...NETWORK_TOOLS], {
       encoding: 'utf8',
       env,
@@ -305,7 +335,12 @@ const runFirewall = (args: string[], stubOverrides: Partial<typeof NETWORK_STUBS
     );
     const result = spawnSync('bash', [firewallScript, ...args], { encoding: 'utf8', env });
     const calls = existsSync(log) ? readFileSync(log, 'utf8').trimEnd().split('\n') : [];
-    return { status: result.status, stdout: result.stdout, calls };
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      calls,
+      pin: existsSync(pinFile) ? readFileSync(pinFile, 'utf8') : undefined,
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -315,20 +350,25 @@ const hostNetworkRules = [
   'iptables -A INPUT -s 172.17.0.0/24 -j ACCEPT',
   'iptables -A OUTPUT -d 172.17.0.0/24 -j ACCEPT',
 ];
-const flushAndLocalRules = [
+const flushRules = [
   'iptables -F',
   'iptables -X',
   'iptables -t nat -F',
   'iptables -t nat -X',
   'iptables -t mangle -F',
   'iptables -t mangle -X',
+];
+const referenceDnsAndSshRules = [
   'iptables -A OUTPUT -p udp --dport 53 -j ACCEPT',
   'iptables -A INPUT -p udp --sport 53 -j ACCEPT',
   'iptables -A OUTPUT -p tcp --dport 22 -j ACCEPT',
   'iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT',
-  'iptables -A INPUT -i lo -j ACCEPT',
-  'iptables -A OUTPUT -o lo -j ACCEPT',
 ];
+const resolverDnsRules = resolvers.flatMap((ns) => [
+  `iptables -A OUTPUT -p udp --dport 53 -d ${ns} -j ACCEPT`,
+  `iptables -A OUTPUT -p tcp --dport 53 -d ${ns} -j ACCEPT`,
+]);
+const loopbackRules = ['iptables -A INPUT -i lo -j ACCEPT', 'iptables -A OUTPUT -o lo -j ACCEPT'];
 const dropAndEstablishedRules = [
   'iptables -P INPUT DROP',
   'iptables -P FORWARD DROP',
@@ -337,13 +377,15 @@ const dropAndEstablishedRules = [
   'iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT',
 ];
 const iptablesRules = (calls: string[]) => calls.filter((call) => call.startsWith('iptables '));
+const ruleCalls = (calls: string[]) => calls.filter((call) => /^(iptables|ipset|ip6tables) /.test(call));
 
-test('the firewall rejects an unknown mode before any network tool runs', () => {
+test('the firewall rejects an unknown mode before any network tool runs or a pin is written', () => {
   for (const args of [[], [''], ['on'], ['WEB'], ['off'], ['bogus', 'a.example.com']]) {
     const result = runFirewall(args);
     assert.equal(result.status, 1, `args: ${JSON.stringify(args)}`);
     assert.match(result.stdout, /ERROR: firewall mode '\w*' is not web or strict/);
     assert.deepEqual(result.calls, [], `args: ${JSON.stringify(args)} called a network tool`);
+    assert.equal(result.pin, undefined);
   }
 });
 
@@ -356,17 +398,26 @@ test('strict mode checks the region and that its hosts resolve before it changes
   const unresolved = runFirewall(['strict'], { dig: '' });
   assert.equal(unresolved.status, 1);
   assert.match(unresolved.stdout, /bedrock-runtime\.us-east-2\.amazonaws\.com does not resolve/);
-  assert.deepEqual(
-    unresolved.calls.filter((call) => /^(iptables|ipset|ip6tables) /.test(call)),
-    [],
-  );
+  assert.deepEqual(ruleCalls(unresolved.calls), []);
+});
+
+test('strict mode needs an IPv4 nameserver and checks for one before it flushes a rule', () => {
+  for (const resolv of ['', '# only a comment\nnameserver 2001:db8::1\nnameserver not-an-address\n']) {
+    const result = runFirewall(['strict'], {}, { resolv });
+    assert.equal(result.status, 1, resolv);
+    assert.match(result.stdout, /ERROR: no IPv4 nameserver in \S+/);
+    assert.deepEqual(ruleCalls(result.calls), [], 'no rule changed');
+    assert.ok(!result.calls.some((call) => call.startsWith('iptables-save')), 'nothing reached the flush');
+  }
 });
 
 test('web mode accepts the host network, then rejects each private range, then drops, then accepts the public internet', () => {
-  const { status, stdout, calls } = runFirewall(['web']);
+  const { status, stdout, calls } = runFirewall(['web'], {}, { resolv: '' });
   assert.equal(status, 0, stdout);
   assert.deepEqual(iptablesRules(calls), [
-    ...flushAndLocalRules,
+    ...flushRules,
+    ...referenceDnsAndSshRules,
+    ...loopbackRules,
     ...hostNetworkRules,
     ...['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '169.254.0.0/16'].map(
       (cidr) => `iptables -A OUTPUT -d ${cidr} -j REJECT --reject-with icmp-admin-prohibited`,
@@ -382,16 +433,23 @@ test('web mode accepts the host network, then rejects each private range, then d
   assert.match(stdout, /Firewall verification passed - unable to reach 169\.254\.169\.254 as expected/);
 });
 
-test('strict mode builds the allowlist first, then accepts only that set and rejects the rest', () => {
+test('strict mode binds DNS to the resolvers, allows no blanket SSH, then builds the allowlist and rejects the rest', () => {
   const { status, stdout, calls } = runFirewall(['strict']);
   assert.equal(status, 0, stdout);
   assert.deepEqual(iptablesRules(calls), [
-    ...flushAndLocalRules,
+    ...flushRules,
+    ...resolverDnsRules,
+    ...loopbackRules,
     ...hostNetworkRules,
     ...dropAndEstablishedRules,
     'iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT',
     'iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited',
   ]);
+  assert.ok(!calls.some((call) => call.includes('--dport 22') || call.includes('--sport 22')), 'no port-22 accept');
+  assert.ok(
+    !iptablesRules(calls).some((call) => call.includes('--dport 53') && !call.includes(' -d ')),
+    'every DNS accept names a resolver',
+  );
 
   const ipsetCalls = calls.filter((call) => call.startsWith('ipset '));
   assert.deepEqual(ipsetCalls.slice(0, 2), ['ipset destroy allowed-domains', 'ipset create allowed-domains hash:net']);
@@ -404,6 +462,7 @@ test('strict mode builds the allowlist first, then accepts only that set and rej
 
   const resolved = calls.flatMap((call) => /^dig \+noall \+answer A (\S+)$/.exec(call)?.[1] ?? []);
   for (const host of [
+    'registry.npmjs.org',
     'api.anthropic.com',
     'claude.ai',
     'claude.com',
@@ -412,37 +471,175 @@ test('strict mode builds the allowlist first, then accepts only that set and rej
     'chatgpt.com',
     'auth.openai.com',
     'bedrock-runtime.us-east-2.amazonaws.com',
-    'sts.us-east-2.amazonaws.com',
   ]) {
     assert.ok(resolved.includes(host), host);
   }
+  assert.deepEqual(
+    resolved.filter((host) => /^sts\.|visualstudio\.com$|vscode\.blob/.test(host)),
+    [],
+    'no STS host and no VS Code host',
+  );
   assert.match(stdout, /Firewall verification passed - unable to reach https:\/\/example\.com as expected/);
 });
 
-test('the host ~/.aws and ~/.npmrc are bind-mounted read-only, so the agent cannot plant a credential_process', () => {
-  const mounts: string[] = devcontainer.mounts;
-  for (const name of ['.aws', '.npmrc']) {
-    assert.ok(
-      mounts.includes(`source=\${localEnv:HOME}/${name},target=/home/node/${name},type=bind,readonly`),
-      `${name} mount`,
-    );
+test('the first run pins the arguments, an identical run proceeds, and any other run exits before it touches a rule', () => {
+  const first = runFirewall(['strict', 'a.example.com']);
+  assert.equal(first.status, 0, first.stdout);
+  assert.equal(first.pin, 'strict\na.example.com\n');
+
+  const again = runFirewall(['strict', 'a.example.com'], {}, { pin: first.pin });
+  assert.equal(again.status, 0, again.stdout);
+  assert.ok(iptablesRules(again.calls).length > 0, 'identical arguments refresh the rules');
+
+  for (const args of [['web'], ['strict'], ['strict', 'b.example.com'], ['strict', 'a.example.com,b.example.com']]) {
+    const different = runFirewall(args, {}, { pin: first.pin });
+    assert.equal(different.status, 1, `args: ${JSON.stringify(args)}`);
+    assert.match(different.stdout, /ERROR: firewall arguments differ from the ones this container was created with/);
+    assert.deepEqual(different.calls, [], `args: ${JSON.stringify(args)} called a network tool`);
+    assert.equal(different.pin, first.pin);
   }
+
+  const web = runFirewall(['web'], {}, { pin: 'web\n' });
+  assert.equal(web.status, 0, web.stdout);
+  assert.equal(runFirewall(['strict'], {}, { pin: web.pin }).status, 1, 'a web container cannot become strict');
 });
 
-test('initializeCommand creates the mount sources and leaves an existing ~/.npmrc alone', () => {
-  const home = mkdtempSync(join(tmpdir(), 'phi-guard-home-'));
-  try {
-    writeFileSync(join(home, '.npmrc'), 'fake-line\n');
-    execFileSync('sh', ['-c', devcontainer.initializeCommand], { env: { PATH: process.env.PATH, HOME: home } });
-    assert.ok(statSync(join(home, '.aws')).isDirectory());
-    assert.equal(readFileSync(join(home, '.npmrc'), 'utf8'), 'fake-line\n');
-
-    rmSync(join(home, '.npmrc'));
-    execFileSync('sh', ['-c', devcontainer.initializeCommand], { env: { PATH: process.env.PATH, HOME: home } });
-    assert.ok(existsSync(join(home, '.npmrc')));
-  } finally {
-    rmSync(home, { recursive: true, force: true });
+test('the mounts are the launcher exchange directory, read-only, so the sandbox holds one session credential and a filtered npmrc', () => {
+  const mounts: string[] = devcontainer.mounts;
+  for (const [source, target] of [
+    ['in/aws', '.aws'],
+    ['in/npmrc', '.npmrc'],
+  ]) {
+    assert.ok(
+      mounts.includes(`source=\${localEnv:NOPHI_EXCHANGE}/${source},target=/home/node/${target},type=bind,readonly`),
+      target,
+    );
   }
+  assert.ok(!mounts.some((mount) => mount.includes('localEnv:HOME')), 'nothing mounts from the host home');
+  assert.equal(devcontainer.initializeCommand, undefined, 'nothing runs on the host at start');
+});
+
+test('the workspace is the clone in the exchange directory, and the bundles cross by two mounts', () => {
+  const mounts: string[] = devcontainer.mounts;
+  assert.equal(
+    devcontainer.workspaceMount,
+    'source=${localEnv:NOPHI_EXCHANGE}/workspace,target=/workspace,type=bind,consistency=delegated',
+  );
+  assert.equal(devcontainer.workspaceFolder, '/workspace');
+  assert.ok(mounts.includes('source=${localEnv:NOPHI_EXCHANGE}/in,target=/nophi/in,type=bind,readonly'));
+  assert.ok(mounts.includes('source=${localEnv:NOPHI_EXCHANGE}/out,target=/nophi/out,type=bind'));
+  assert.ok(!JSON.stringify(devcontainer).includes('localWorkspaceFolder}/'), 'the host working tree is not mounted');
+});
+
+// sync.sh runs in the container as an unprivileged user; here it runs on temp directories.
+const gitEnv = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_AUTHOR_NAME: 'Test',
+  GIT_AUTHOR_EMAIL: 'test@example.com',
+  GIT_COMMITTER_NAME: 'Test',
+  GIT_COMMITTER_EMAIL: 'test@example.com',
+};
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync('git', args, { cwd, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const syncScript = fileURLToPath(new URL('.devcontainer/sync.sh', root));
+
+const withSync = (check: (sync: (...args: string[]) => SpawnSyncReturns<string>, dirs: SyncDirs) => void) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sync-'));
+  try {
+    const dirs = { dir, workspace: join(dir, 'workspace'), in: join(dir, 'in'), out: join(dir, 'out') };
+    for (const path of [dirs.workspace, dirs.in, dirs.out]) mkdirSync(path);
+    const sync = (...args: string[]) =>
+      spawnSync('bash', [syncScript, ...args], {
+        encoding: 'utf8',
+        env: { ...gitEnv, WORKSPACE: dirs.workspace, NOPHI_IN: dirs.in, NOPHI_OUT: dirs.out },
+      });
+    check(sync, dirs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+type SyncDirs = { dir: string; workspace: string; in: string; out: string };
+
+// A host repo on `main` with a commit, bundled the way bin/nophi does.
+const hostBundle = ({ dir, in: inDir }: SyncDirs, { detach = false } = {}) => {
+  const host = join(dir, 'host');
+  if (!existsSync(host)) {
+    mkdirSync(host);
+    git(host, 'init', '-q', '-b', 'main');
+  }
+  git(host, 'commit', '-q', '--allow-empty', '-m', 'host work');
+  if (detach) git(host, 'checkout', '-q', '--detach');
+  git(host, 'bundle', 'create', '-q', join(inDir, 'host.bundle'), '--branches', '--tags', 'HEAD');
+  return host;
+};
+
+test('sync.sh in builds the clone on the host branch, tracking host/<branch>', () => {
+  withSync((sync, dirs) => {
+    const host = hostBundle(dirs);
+    git(host, 'tag', 'v1');
+    hostBundle(dirs);
+    const result = sync('in', 'main');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(git(dirs.workspace, 'rev-parse', '--abbrev-ref', 'HEAD'), 'main');
+    assert.equal(git(dirs.workspace, 'rev-parse', '--abbrev-ref', '@{u}'), 'host/main');
+    assert.equal(git(dirs.workspace, 'rev-parse', 'HEAD'), git(host, 'rev-parse', 'main'));
+    assert.equal(git(dirs.workspace, 'remote', 'get-url', 'host'), join(dirs.in, 'host.bundle'));
+    assert.equal(git(dirs.workspace, 'rev-parse', 'v1'), git(host, 'rev-parse', 'v1'));
+  });
+});
+
+test('a second sync.sh in moves host/<branch> and leaves the checkout and local work alone', () => {
+  withSync((sync, dirs) => {
+    const host = hostBundle(dirs);
+    assert.equal(sync('in', 'main').status, 0);
+    git(dirs.workspace, 'commit', '-q', '--allow-empty', '-m', 'sandbox work');
+    const mine = git(dirs.workspace, 'rev-parse', 'HEAD');
+    hostBundle(dirs);
+    const result = sync('in', 'main');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /the host moved: main$/m);
+    assert.equal(git(dirs.workspace, 'rev-parse', 'HEAD'), mine);
+    assert.equal(git(dirs.workspace, 'rev-parse', 'host/main'), git(host, 'rev-parse', 'main'));
+    assert.equal(sync('in', 'main').stdout, '', 'an unchanged host prints nothing');
+  });
+});
+
+test('sync.sh in with a commit id checks it out detached, from the explicitly fetched HEAD', () => {
+  withSync((sync, dirs) => {
+    const host = hostBundle(dirs, { detach: true });
+    const sha = git(host, 'rev-parse', 'HEAD');
+    const result = sync('in', sha);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(git(dirs.workspace, 'rev-parse', 'HEAD'), sha);
+    assert.equal(git(dirs.workspace, 'rev-parse', 'refs/remotes/host/HEAD'), sha);
+    assert.equal(spawnSync('git', ['symbolic-ref', '-q', 'HEAD'], { cwd: dirs.workspace, env: gitEnv }).status, 1);
+  });
+});
+
+test('sync.sh out writes a bundle git accepts, listing HEAD, and writes nothing from an empty clone', () => {
+  withSync((sync, dirs) => {
+    const empty = sync('out');
+    assert.equal(empty.status, 0);
+    assert.match(empty.stderr, /nothing in .* to send back/);
+    assert.equal(existsSync(join(dirs.out, 'sandbox.bundle')), false);
+    assert.equal(existsSync(join(dirs.out, 'sandbox.bundle.tmp')), false);
+
+    hostBundle(dirs);
+    assert.equal(sync('in', 'main').status, 0);
+    git(dirs.workspace, 'commit', '-q', '--allow-empty', '-m', 'sandbox work');
+    git(dirs.workspace, 'checkout', '-q', '--detach');
+    git(dirs.workspace, 'commit', '-q', '--allow-empty', '-m', 'detached work');
+    const result = sync('out');
+    assert.equal(result.status, 0, result.stderr);
+    const bundle = join(dirs.out, 'sandbox.bundle');
+    git(dirs.workspace, 'bundle', 'verify', bundle);
+    const heads = git(dirs.workspace, 'bundle', 'list-heads', bundle);
+    assert.ok(heads.includes(`${git(dirs.workspace, 'rev-parse', 'HEAD')} HEAD`));
+    assert.ok(heads.includes('refs/heads/main'));
+    assert.equal(existsSync(`${bundle}.tmp`), false);
+  });
 });
 
 // Sources the firewall script, which only defines functions then, and calls one.
@@ -464,35 +661,6 @@ const withFile = (content: string, check: (path: string) => void) => {
     rmSync(dir, { recursive: true, force: true });
   }
 };
-
-test('the firewall derives SSO hosts from each valid sso_region in the AWS config', () => {
-  const config = [
-    '[default]',
-    'region = us-east-1',
-    '[profile phi-guard]',
-    'sso_session = corp',
-    'sso_account_id = 123456789012',
-    '[sso-session corp]',
-    'sso_start_url = https://example.awsapps.com/start',
-    'sso_region = us-east-2',
-    '[profile other]',
-    '  sso_region = eu-west-1  ',
-    'sso_region = us-east-2',
-    'sso_region = evil.com;rm -rf /',
-    '',
-  ].join('\n');
-  withFile(config, (path) => {
-    const { hosts, warnings } = callFirewallFunction('sso_hosts_from_config', path);
-    assert.deepEqual(hosts, [
-      'portal.sso.eu-west-1.amazonaws.com',
-      'oidc.eu-west-1.amazonaws.com',
-      'portal.sso.us-east-2.amazonaws.com',
-      'oidc.us-east-2.amazonaws.com',
-    ]);
-    assert.match(warnings, /invalid sso_region 'evil\.com;rm -rf \/'/);
-  });
-  assert.deepEqual(callFirewallFunction('sso_hosts_from_config', '/nonexistent/config'), { hosts: [], warnings: '' });
-});
 
 test('the firewall derives only CodeArtifact registry hosts from the npmrc and never prints a token', () => {
   const npmrc = [

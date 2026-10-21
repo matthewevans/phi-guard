@@ -55,8 +55,9 @@ COPY dist /opt/phi-guard/dist
 RUN chmod -R u=rwX,go=rX /opt/phi-guard
 
 # Enforced agent config. The guardrail options are added to phi-guard.json at the end of
-# this file. The AWS profile they name comes from the engineer's own ~/.aws/config, which
-# devcontainer.json mounts read-only.
+# this file. The hooks use the default credential chain: ~/.aws/credentials, which
+# devcontainer.json mounts read-only from the launcher's exchange directory and which
+# holds one short-lived session for the ApplyGuardrail role.
 COPY .devcontainer/claude-code/phi-guard.json /etc/claude-code/managed-settings.d/phi-guard.json
 COPY .devcontainer/codex/requirements.toml .devcontainer/codex/managed_config.toml /etc/codex/
 RUN chmod 0644 /etc/claude-code/managed-settings.d/phi-guard.json /etc/codex/*.toml
@@ -64,17 +65,19 @@ RUN chmod 0644 /etc/claude-code/managed-settings.d/phi-guard.json /etc/codex/*.t
 # Visible sandbox markers: the Claude status line (named in phi-guard.json) and an
 # interactive shell banner and prompt prefix, which both system rc files source. Neither
 # touches non-interactive shells, where the hook commands run.
-COPY .devcontainer/statusline.sh .devcontainer/sandbox-banner.sh .devcontainer/health-check.sh /opt/phi-guard/
-RUN chmod 0755 /opt/phi-guard/statusline.sh /opt/phi-guard/health-check.sh && chmod 0644 /opt/phi-guard/sandbox-banner.sh && \
+COPY .devcontainer/statusline.sh .devcontainer/sandbox-banner.sh .devcontainer/health-check.sh .devcontainer/sync.sh /opt/phi-guard/
+RUN chmod 0755 /opt/phi-guard/statusline.sh /opt/phi-guard/health-check.sh /opt/phi-guard/sync.sh && chmod 0644 /opt/phi-guard/sandbox-banner.sh && \
   echo '. /opt/phi-guard/sandbox-banner.sh' | tee -a /etc/zsh/zshrc /etc/bash.bashrc > /dev/null
 
 # Create workspace and config directories and set permissions
 RUN mkdir -p /workspace /home/node/.claude /home/node/.codex && \
   chown -R node:node /workspace /home/node/.claude /home/node/.codex
 
-# Copy and set up firewall script
+# Copy and set up firewall script. /etc/phi-guard is the root-owned home of the file in which
+# the script pins its arguments.
 COPY .devcontainer/init-firewall.sh /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/init-firewall.sh && \
+  mkdir -p /etc/phi-guard && \
   echo "node ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/node-firewall && \
   chmod 0440 /etc/sudoers.d/node-firewall
 
@@ -105,7 +108,6 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ARG PHI_GUARD_GUARDRAIL_ID
 ARG PHI_GUARD_GUARDRAIL_VERSION
 ARG PHI_GUARD_AWS_REGION
-ARG PHI_GUARD_AWS_PROFILE=phi-guard
 
 # Every way of building the image passes through this check, so none ships empty options.
 # It prints variable names only, never values.
@@ -122,7 +124,6 @@ RUN settings=/etc/claude-code/managed-settings.d/phi-guard.json && \
     --arg guardrail_id "$PHI_GUARD_GUARDRAIL_ID" \
     --arg guardrail_version "$PHI_GUARD_GUARDRAIL_VERSION" \
     --arg aws_region "$PHI_GUARD_AWS_REGION" \
-    --arg aws_profile "$PHI_GUARD_AWS_PROFILE" \
     '.pluginConfigs["phi-guard@phi-guard"].options = $ARGS.named' "$settings") && \
   printf '%s\n' "$contents" > "$settings"
 
@@ -135,6 +136,5 @@ RUN jq '{env, permissions, statusLine, pluginConfigs: {"phi-guard@inline": .plug
 ENV PHI_GUARD_GUARDRAIL_ID=$PHI_GUARD_GUARDRAIL_ID
 ENV PHI_GUARD_GUARDRAIL_VERSION=$PHI_GUARD_GUARDRAIL_VERSION
 ENV PHI_GUARD_AWS_REGION=$PHI_GUARD_AWS_REGION
-ENV PHI_GUARD_AWS_PROFILE=$PHI_GUARD_AWS_PROFILE
 
 USER node

@@ -50,8 +50,8 @@
 # Live scenarios. LC1, LC2, LX1 and LX2 run the shipped hooks against a real guardrail.
 # They run only when PHI_GUARD_GUARDRAIL_ID, PHI_GUARD_GUARDRAIL_VERSION and
 # PHI_GUARD_AWS_REGION are set in the caller's environment (PHI_GUARD_AWS_PROFILE
-# defaults to phi-guard, the sandbox default, when unset; set but empty it selects the
-# default AWS credential chain), otherwise they SKIP. The bogus-id
+# defaults to phi-guard, nophi's host-side default, when unset; set but empty it selects
+# the default AWS credential chain), otherwise they SKIP. The bogus-id
 # scenarios above keep the bogus id when those variables are exported. The fake PII is
 # the name "Jane Example" and the email "jane.example@example.com".
 #   LC1  Claude, prompt blocked. As C1 with the real values. The answer contains
@@ -123,7 +123,7 @@ printf 'patient %s, email %s\n' "$FAKE_NAME" "$FAKE_EMAIL" >"$WORK/pii.txt"
 HELPERS=$ROOT/scripts/e2e
 BOGUS_ID=phi-guard-e2e-bogus-guardrail
 BOGUS_ENV=("PHI_GUARD_GUARDRAIL_ID=$BOGUS_ID" PHI_GUARD_GUARDRAIL_VERSION=1 PHI_GUARD_AWS_REGION=us-east-1 PHI_GUARD_AWS_PROFILE=)
-LIVE_PROFILE=${PHI_GUARD_AWS_PROFILE-phi-guard} # unset: the sandbox default; set but empty: the default credential chain
+LIVE_PROFILE=${PHI_GUARD_AWS_PROFILE-phi-guard} # unset: the nophi host-side default; set but empty: the default credential chain
 LIVE_ENV=("PHI_GUARD_GUARDRAIL_ID=${PHI_GUARD_GUARDRAIL_ID:-}" "PHI_GUARD_GUARDRAIL_VERSION=${PHI_GUARD_GUARDRAIL_VERSION:-}"
   "PHI_GUARD_AWS_REGION=${PHI_GUARD_AWS_REGION:-}" "PHI_GUARD_AWS_PROFILE=$LIVE_PROFILE")
 CLAUDE_TIMEOUT=180

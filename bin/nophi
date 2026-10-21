@@ -2,29 +2,34 @@
 # nophi: run Claude Code or Codex in the phi-guard NO PHI sandbox for the git repo
 # you are in. The launcher builds the image from the payload next to it (this repo,
 # or the Homebrew libexec copy), so .devcontainer/devcontainer.json stays the single
-# source for mounts, capabilities, the firewall and env.
+# source for mounts, capabilities, the firewall and env. It also owns the per-repo
+# exchange directory that devcontainer.json mounts: one minted AWS session credential,
+# a filtered npmrc, and the git bundles that carry the repo into the sandbox's clone and
+# the sandbox's commits back. The host reads and writes plain files there and runs git
+# only in your repo.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: nophi [--rebuild] [--i-checked-no-phi] <claude|codex|shell|down> [args...]
+Usage: nophi [--rebuild] <claude|codex|shell|down> [args...]
 
   claude, codex   run the agent in the NO PHI sandbox; args pass through to it
   shell           open zsh in the sandbox
-  down            remove this repo's sandbox container
+  down            remove this repo's sandbox container and its minted credentials (the clone stays)
 
-  --rebuild            recreate the container (after changing PHI_GUARD_FIREWALL or the guardrail variables)
-  --i-checked-no-phi   skip the stop for untracked data-like files (csv, sql, ...)
+  --rebuild   recreate the container (after changing PHI_GUARD_FIREWALL or the guardrail variables)
+
+Environment:
+  PHI_GUARD_AWS_PROFILE   host AWS profile whose session is minted for the sandbox
+                          (default phi-guard; set but empty counts as unset)
 EOF
 }
 
 rebuild=0
-checked=0
 while [ $# -gt 0 ]; do
   case $1 in
     -h | --help) usage; exit 0 ;;
     --rebuild) rebuild=1 ;;
-    --i-checked-no-phi) checked=1 ;;
     -*) usage >&2; exit 2 ;;
     *) break ;;
   esac
@@ -42,47 +47,183 @@ die() {
   exit 1
 }
 
+# The sandbox owns the clone under the cache directory. Git run there on the host would
+# execute config the sandbox planted (core.fsmonitor, hooks), so refuse before any git call.
+if cache=$(cd "${XDG_CACHE_HOME:-$HOME/.cache}/nophi" 2>/dev/null && pwd -P); then
+  case $(pwd -P) in "$cache" | "$cache"/*) die "run nophi from your repo, not from the sandbox clone" ;; esac
+fi
+
 here=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
 config=$here/.devcontainer/devcontainer.json
 root=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this inside a git repo"
-dc=(--workspace-folder "$root" --config "$config")
 
-# The devcontainer CLI labels its containers with the resolved workspace and config
-# paths. Prints how many it removed, or returns non-zero when docker cannot remove them.
+# The per-repo host directory that devcontainer.json mounts through NOPHI_EXCHANGE.
+exchange=${XDG_CACHE_HOME:-$HOME/.cache}/nophi/$(basename "$root")-$(printf %s "$root" | shasum | cut -c1-8)
+export NOPHI_EXCHANGE=$exchange
+
+# The id labels replace the CLI's default devcontainer.local_folder and config_file
+# labels, so up and exec must pass the same ones. The CLI reuses a container on a label
+# match alone and never compares mounts, so a container made before the exchange mounts
+# (no schema label) can never be picked up.
+dc=(--workspace-folder "$root" --config "$config" --id-label nophi.schema=3 --id-label "nophi.repo=$root")
+
+# Prints how many containers it removed, or returns non-zero when docker cannot remove them.
 remove_containers() {
   # shellcheck disable=SC2046 # one word per container id
-  set -- $(docker ps -aq --filter "label=devcontainer.local_folder=$root" --filter "label=devcontainer.config_file=$config")
+  set -- $(docker ps -aq --filter "label=nophi.schema=3" --filter "label=nophi.repo=$root")
   [ $# -eq 0 ] || docker rm -f "$@" >/dev/null || return
   echo $#
+}
+
+# Removes this repo's containers from before the exchange mounts. They carry the CLI's
+# default labels and mounted the whole host ~/.aws. Their config label is this payload's
+# config or an earlier Homebrew version's. No --quiet: with it Docker ignores --format and
+# prints ids only.
+remove_legacy_containers() {
+  local listing id label ids=()
+  listing=$(docker ps -a --filter "label=devcontainer.local_folder=$root" \
+    --format '{{.ID}}\t{{.Label "devcontainer.config_file"}}') || return
+  while IFS=$'\t' read -r id label; do
+    if [[ $label == "$config" || $label == */nophi/*/libexec/.devcontainer/devcontainer.json ]]; then
+      ids+=("$id")
+    fi
+  done <<<"$listing"
+  if [ ${#ids[@]} -gt 0 ]; then
+    docker rm -f "${ids[@]}" >/dev/null || return
+    echo "nophi: removed ${#ids[@]} container(s) from an earlier version; they mounted your whole ~/.aws" >&2
+  fi
+}
+
+# Brings the sandbox's commits back after a session. The host copies one file out of the
+# sandbox-writable out/ and trusts only the copy: it must be a regular file that starts like
+# a bundle, which refuses a symlink or a gitdir: pointer to another repo. Nothing here may
+# fail the session, so each step ends in a warning. An interrupted session (Ctrl-C) skips it,
+# and the next session's exit sends the commits.
+sync_out() {
+  local src=$exchange/out/sandbox.bundle copy=$exchange/returned.bundle.tmp
+  local returned=$exchange/returned.bundle current signature
+  skip() { echo "nophi: warning: sandbox commits were not copied back: $*" >&2; }
+  devcontainer exec "${dc[@]}" bash /opt/phi-guard/sync.sh out </dev/null || { skip "the bundle step failed"; return 0; }
+  { [ -f "$src" ] && [ ! -L "$src" ]; } || { skip "the sandbox wrote no bundle"; return 0; }
+  # A swap between the check above and the copy leaves a symlink at $copy, so every path out of here
+  # removes it and the next cp never writes through one.
+  rm -f "$copy"
+  cp -P "$src" "$copy" || { rm -f "$copy"; skip "could not copy the bundle"; return 0; }
+  { [ -f "$copy" ] && [ ! -L "$copy" ]; } || { rm -f "$copy"; skip "the bundle is not a regular file"; return 0; }
+  signature=$(head -n1 "$copy") || { rm -f "$copy"; skip "could not read the bundle"; return 0; }
+  case $signature in
+    '# v2 git bundle' | '# v3 git bundle') ;;
+    *) rm -f "$copy"; skip "the file is not a git bundle"; return 0 ;;
+  esac
+  # A v3 header may carry capability lines before its refs. Only the object format is accepted:
+  # a filter makes git fail the fetch and still leave a promisor pack in this repo.
+  while IFS= read -r line; do
+    [ "$line" = '@object-format=sha1' ] || { rm -f "$copy"; skip "the bundle asks for a capability nophi does not accept"; return 0; }
+  done < <(LC_ALL=C sed -n '2,/^$/{/^@/p;}' "$copy")
+  mv "$copy" "$returned" || { skip "could not store the bundle"; return 0; }
+  if current=$(git -C "$root" remote get-url nophi 2>/dev/null); then
+    [ "$current" = "$returned" ] || git -C "$root" remote set-url nophi "$returned" || { skip "could not set the remote"; return 0; }
+  else
+    git -C "$root" remote add nophi "$returned" || { skip "could not add the remote"; return 0; }
+  fi
+  # Sandbox tags must not land in this repo's refs/tags. HEAD comes back as nophi/HEAD, for work on
+  # a detached checkout.
+  {
+    git -C "$root" config remote.nophi.tagOpt --no-tags &&
+      git -C "$root" config --replace-all remote.nophi.fetch '+refs/heads/*:refs/remotes/nophi/*' &&
+      git -C "$root" config --add remote.nophi.fetch '+HEAD:refs/remotes/nophi/HEAD'
+  } || { skip "could not configure the remote"; return 0; }
+  echo "nophi: sandbox commits are in remote 'nophi' (git fetch nophi)"
 }
 
 docker info >/dev/null 2>&1 || die "Docker is not running; start Docker and retry"
 
 if [ "$cmd" = down ]; then
+  remove_legacy_containers || die "could not remove containers from an earlier version"
+  # The credentials expire by themselves (an hour by default) but go now, even if docker fails.
+  rm -f "$exchange/in/aws/credentials"
   count=$(remove_containers)
-  echo "nophi: removed $count sandbox container(s) for $root"
+  echo "nophi: removed $count sandbox container(s) for $root; the sandbox clone stays in $exchange"
   exit 0
 fi
 
 command -v devcontainer >/dev/null || die "devcontainer CLI not found; run: brew install devcontainer"
 
-if [ "$checked" = 0 ]; then
-  specs=()
-  for ext in csv tsv xls xlsx parquet avro orc jsonl ndjson sql dump bak sqlite sqlite3 db; do
-    specs+=(":(glob,icase)**/*.$ext")
-  done
-  # Without --exclude-standard, gitignored files count too.
-  found=$(git -C "$root" ls-files --others -z -- "${specs[@]}" | tr '\0' '\n')
-  if [ -n "$found" ]; then
-    total=0
-    echo "nophi: untracked data-like files in $root:" >&2
-    while IFS= read -r file; do
-      total=$((total + 1))
-      [ "$total" -gt 10 ] || echo "  $file" >&2
-    done <<<"$found"
-    [ "$total" -le 10 ] || echo "  ... $total files in all" >&2
-    die "move them out of the repo, or rerun with --i-checked-no-phi once you know they hold no PHI"
+remove_legacy_containers || echo "nophi: warning: could not remove containers from an earlier version" >&2
+
+# Only committed content enters the sandbox, and an empty repo has none. Checked before
+# minting so that refusing it leaves nothing behind.
+git -C "$root" rev-parse -q --verify HEAD >/dev/null || die "the repo has no commits yet; commit first"
+
+# shell and codex login need no AWS, so a failed credential export only warns for them.
+needs_aws=1
+if [ "$cmd" = shell ] || { [ "$cmd" = codex ] && [ "${1:-}" = login ]; }; then needs_aws=0; fi
+
+# Mints one session credential for the profile the sandbox may use and writes it as the
+# sandbox's default profile. The temp file sits in the target directory, so the rename is
+# atomic and a running container sees the refresh through the directory mount. The values
+# travel only through the pipe, never argv, the log or the terminal.
+mint_credentials() (
+  umask 077
+  profile=${PHI_GUARD_AWS_PROFILE:-phi-guard}
+  tmp=$(mktemp "$exchange/in/aws/.credentials.XXXXXX") || exit
+  if aws configure export-credentials --profile "$profile" --format process | jq -er '
+    if .SessionToken and .Expiration then
+      if .AccessKeyId and .SecretAccessKey then
+        "[default]\naws_access_key_id = \(.AccessKeyId)\naws_secret_access_key = \(.SecretAccessKey)\naws_session_token = \(.SessionToken)"
+      else error("the export has no access key")
+      end
+    else error("the profile gave long-lived static keys, which are not accepted")
+    end' >"$tmp" && mv "$tmp" "$exchange/in/aws/credentials"; then
+    exit 0
   fi
+  rm -f "$tmp"
+  exit 1
+)
+
+# Writes only the CodeArtifact registry lines and those hosts' auth tokens from the host
+# ~/.npmrc. The file is a file mount, so it is rewritten in place: a renamed file would
+# leave a reused container holding the old inode. The hosts come from the firewall's own
+# parser, sourced in a subshell (its guard returns before any rule) to keep its globals out.
+write_npmrc() (
+  umask 077
+  # shellcheck disable=SC1091 # shellchecked on its own
+  hosts=$(. "$here/.devcontainer/init-firewall.sh" && codeartifact_hosts_from_npmrc "$HOME/.npmrc")
+  registry_re='^[[:space:]]*(@[^:=[:space:]]+:)?registry[[:space:]]*=[[:space:]]*(.*)$'
+  url_re='^https://([^/:]+)(:[0-9]+)?(/|$)'
+  token_re='^[[:space:]]*//([^/:]+)(:[0-9]+)?/[^=]*:_authToken[[:space:]]*='
+  : >"$exchange/in/npmrc"
+  [ -r "$HOME/.npmrc" ] || exit 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    host=
+    if [[ $line =~ $registry_re ]]; then
+      url=${BASH_REMATCH[2]//[\"\']/}
+      [[ $url =~ $url_re ]] && host=${BASH_REMATCH[1]}
+    elif [[ $line =~ $token_re ]]; then
+      host=${BASH_REMATCH[1]}
+    fi
+    if [ -n "$host" ] && [[ $'\n'$hosts$'\n' == *$'\n'"$host"$'\n'* ]]; then
+      printf '%s\n' "$line"
+    fi
+  done <"$HOME/.npmrc" >>"$exchange/in/npmrc"
+)
+
+(umask 077 && mkdir -p "$exchange/in/aws" "$exchange/out" "$exchange/workspace")
+if ! mint_credentials; then
+  hint="could not get credentials for AWS profile ${PHI_GUARD_AWS_PROFILE:-phi-guard}; run good-morning (aws sso login) on this machine, or export PHI_GUARD_AWS_PROFILE"
+  if [ "$needs_aws" = 1 ]; then die "$hint"; fi
+  echo "nophi: warning: $hint" >&2
+fi
+write_npmrc
+
+# Reachable commits only (branches, tags and HEAD for a detached checkout), so staged
+# blobs, stashes and untracked or ignored files stay on the host.
+git -C "$root" bundle create -q "$exchange/in/host.bundle.tmp" --branches --tags HEAD
+mv "$exchange/in/host.bundle.tmp" "$exchange/in/host.bundle"
+ref=$(git -C "$root" symbolic-ref --short -q HEAD || git -C "$root" rev-parse HEAD)
+if [ -n "$(git -C "$root" status --porcelain)" ]; then
+  echo "nophi: uncommitted changes stay on this machine; the sandbox gets committed content only" >&2
 fi
 
 up=(devcontainer up "${dc[@]}")
@@ -102,14 +243,16 @@ rm -f "$log"
 # The check prints nothing when phi-guard is enforcing, else the reason (see
 # .devcontainer/health-check.sh). For Claude it sends a fake-PII canary through the real
 # CLI, so a login whose org settings drop the plugin stops here. Codex logins need no AWS.
-if [ "$cmd" != shell ] && ! { [ "$cmd" = codex ] && [ "${1:-}" = login ]; }; then
+if [ "$needs_aws" = 1 ]; then
   status=0
   out=$(devcontainer exec "${dc[@]}" bash /opt/phi-guard/health-check.sh "$cmd" </dev/null 2>/dev/null) || status=$?
   if [ "$status" != 0 ] || [ -n "$out" ]; then
     echo "nophi: the phi-guard health check failed: ${out:-exit status $status}" >&2
-    die "if this is a credentials error, run good-morning on this machine"
+    die "if this is a credentials error, check that the AWS profile's role allows bedrock:ApplyGuardrail on the guardrail"
   fi
 fi
+
+devcontainer exec "${dc[@]}" bash /opt/phi-guard/sync.sh in "$ref" </dev/null || die "could not copy the repo into the sandbox"
 
 if [ -t 1 ] && { : >/dev/tty; } 2>/dev/null; then
   # Dark red on dark themes, light pink on light ones (COLORFGBG ends in the background).
@@ -134,4 +277,7 @@ fi
 
 agent=$cmd
 [ "$cmd" != shell ] || agent=zsh
-devcontainer exec "${dc[@]}" --remote-env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 "$agent" "$@"
+status=0
+devcontainer exec "${dc[@]}" --remote-env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 "$agent" "$@" || status=$?
+sync_out
+exit "$status"

@@ -4,10 +4,14 @@ phi-guard keeps PHI away from a model provider that has no BAA, so a developer c
 use a personal Claude Code or Codex CLI subscription for code-only work. It is a
 plugin for both agents plus a reference dev container.
 
-The sandbox is the boundary: the container runs the agent on the repo you open in
-it (`nophi` mounts your working tree, so a fresh or shallow clone is the safest choice)
-with an egress firewall and your host `~/.aws` and `~/.npmrc` mounted read-only. The
-hooks are a safety net for human error. A prompt hook blocks prompts that contain
+The sandbox is the boundary: the container runs the agent on a clone of your repo's
+committed content, which `nophi` hands over as a git bundle (your working tree is never
+mounted), with an egress firewall (the `strict` allowlist by default) and two read-only
+credential files that `nophi` writes for it: one short-lived AWS session for a role that can
+only call `ApplyGuardrail`, and an npmrc filtered to CodeArtifact. Your host `~/.aws` and
+`~/.npmrc` are never mounted. The ["Clean room" section of
+ARCHITECTURE.md](docs/ARCHITECTURE.md#clean-room) lists what the sandbox holds, what it can
+reach and every residual. The hooks are a safety net for human error. A prompt hook blocks prompts that contain
 PHI, and output hooks mask PHI in shell command output (and, in Claude Code, in files
 read with Read, Grep or an `@file` mention) before the model sees it.
 Both call Amazon Bedrock Guardrails `ApplyGuardrail` in your BAA-covered AWS account. When a scan fails for
@@ -56,16 +60,21 @@ phi-guard from the command line, so a Team or Enterprise login cannot drop it. C
 container is its boundary. The guardrail values are not in the repo. Export
 `PHI_GUARD_GUARDRAIL_ID`, `PHI_GUARD_GUARDRAIL_VERSION` and `PHI_GUARD_AWS_REGION` in
 the host environment before the image is built, which fails with the names of any that
-are empty. `PHI_GUARD_AWS_PROFILE` is optional: unset means `phi-guard`, and set but empty means the
-default AWS credential chain. A container
-keeps the image it was created from, so after changing a guardrail variable or
-`PHI_GUARD_FIREWALL` rebuild it (`nophi --rebuild`).
+are empty. A container
+keeps the image it was created from, so after changing a guardrail variable,
+`PHI_GUARD_FIREWALL` or `PHI_GUARD_EXTRA_HOSTS` rebuild it (`nophi --rebuild`).
 
-The container mounts your host `~/.aws` and `~/.npmrc` read-only. The hooks call
-Bedrock with the AWS profile above (`phi-guard` unless you export another), so add a
-`[profile phi-guard]` to your `~/.aws/config`: an SSO profile whose role allows
-`bedrock:ApplyGuardrail` on the guardrail. Refresh credentials on the host
-(`aws sso login`, CodeArtifact login). An expired session blocks prompts until you do.
+The container holds one AWS credential: a single short-lived session for a role whose only
+permission is `bedrock:ApplyGuardrail` on the guardrail. Attach `ApplyGuardrailPolicy`
+(`infra/guardrail.yaml`) to a dedicated role or permission set, name an SSO or assume-role
+profile for it `phi-guard` in your host `~/.aws/config`, and sign in on the host
+(`aws sso login`). At every launch `nophi` exports a session from that profile and
+writes it to the sandbox's `~/.aws/credentials`, and it refuses long-lived static keys.
+`PHI_GUARD_AWS_PROFILE` is a host variable that names another profile (unset or empty means
+`phi-guard`). It reaches no image and no container, which configure no profile. The sandbox
+gets no SSO token, no `~/.aws/config` and no other role. Its npmrc holds only the CodeArtifact
+`registry=` lines of your host `~/.npmrc` and those hosts' auth tokens. An expired session
+blocks prompts until you rerun `nophi`.
 
 Sign in to Claude Code and Codex inside the container. Both logins live in the Docker
 volumes `phi-guard-claude-config` and `phi-guard-codex-config`, which every repo's
@@ -78,11 +87,17 @@ also shows the firewall mode, and the container hostname `phi-guard-sandbox` (sh
 the Codex status line).
 
 Set `PHI_GUARD_FIREWALL` in the host environment before opening the container:
-`web` (the default), `strict` or `off`. The value is fixed when the container is
+`strict` (the default), `web` or `off`. The value is fixed when the container is
 created, and the hooks never read it. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#firewall-modes)
-says what each mode allows. In `strict` mode, add other hosts, such as a CodeArtifact
-endpoint for pip, with a comma-separated `PHI_GUARD_EXTRA_HOSTS`, and restart the
-container after changing `~/.aws/config` or `~/.npmrc`.
+says what each mode allows. `strict` allows only the agent providers, GitHub, npm and
+CodeArtifact, and the Bedrock endpoint, so WebFetch and `curl` to other hosts fail, and so do
+PyPI, the Go proxy, Maven, Docker Hub and apt. Add hosts, such as a CodeArtifact endpoint
+for pip, with a comma-separated `PHI_GUARD_EXTRA_HOSTS`, or opt in to `web` (any public
+host, private ranges rejected) with `PHI_GUARD_FIREWALL=web nophi --rebuild claude`. The
+firewall script pins its mode and extra hosts at the first start, so changing either needs
+`nophi --rebuild`. Restart the container after changing `~/.npmrc`. Only terminal `nophi`
+sessions are supported: attaching VS Code is outside the sandbox, and its hosts are not on
+the `strict` list.
 
 ## Launcher
 
@@ -95,37 +110,78 @@ brew tap matthewevans/phi-guard https://github.com/matthewevans/phi-guard.git
 brew install nophi
 ```
 
-The formula installs the `devcontainer` CLI. Docker must be running, and `realpath`
-needs macOS 13 or later. Add the `[profile phi-guard]` entry to `~/.aws/config`
-described above, then:
+The formula installs the `devcontainer` CLI, the AWS CLI and `jq`. Docker must be
+running, and `realpath` needs macOS 13 or later. Set up the `phi-guard` profile described
+above, then:
 
 ```
 nophi claude [args...]      # Claude Code in the sandbox
 nophi codex [args...]       # Codex in the sandbox
 nophi shell                 # zsh in the sandbox
-nophi down                  # remove this repo's sandbox container
+nophi down                  # remove this repo's sandbox container and its credentials
 nophi codex login --device-auth
 ```
 
 Flags go before the subcommand and everything after it passes to the agent.
-`--rebuild` recreates the container. The sandbox mounts your working tree, so edits land in your
-checkout. Git worktrees do not work inside it, because a worktree's `.git` file
-points at a host path.
+`--rebuild` recreates the container.
 
-Before it starts, `nophi` stops if the repo holds untracked or gitignored files with
-a data-like extension (`csv`, `tsv`, `xls`, `xlsx`, `parquet`, `avro`, `orc`,
-`jsonl`, `ndjson`, `sql`, `dump`, `bak`, `sqlite`, `sqlite3`, `db`), lists up to ten
-of them, and proceeds only when they are moved out or you pass
-`--i-checked-no-phi`. The [launcher section of
-ARCHITECTURE.md](docs/ARCHITECTURE.md#launcher) lists what the stop misses. After the
-container starts, a health check sends a fake-PII canary prompt through the agent and
+**What enters the sandbox.** At every launch `nophi` bundles your repo's branches, tags and
+`HEAD` (`git bundle`, run only in your repo) and the sandbox builds its clone from that
+bundle. Only committed, reachable content enters: untracked and ignored files (a stray
+`export.csv`), the stash and unreferenced objects stay on your machine, and `nophi` says
+once when the working tree has uncommitted changes. A repo with no commits is refused.
+Tracked data files are the repo's own problem, as is its history; LFS content, nested
+repos and submodules are not bundled. Git worktrees work, because the host repo is only
+bundled. The first launch checks out your current branch (or the detached commit) in
+`/workspace`, tracking `host/<branch>`. Later launches refresh `host/*` from a new bundle
+and leave the clone's branches and checkout alone, which is where your sandbox work lives
+between sessions.
+
+**How work returns.** When a `claude`, `codex` or `shell` session ends, the sandbox writes
+its branches and tags to a bundle, and `nophi` keeps a validated copy and points the remote
+`nophi` of your repo at it. Then:
+
+```
+git fetch nophi
+git merge nophi/<branch>   # or: git log nophi/<branch>, git cherry-pick ...
+```
+
+Work done on a detached checkout in the sandbox comes back as `nophi/HEAD`. Sandbox tags do
+not land in your `refs/tags`. A Ctrl-C skips the copy, and the next session's exit sends the
+commits. Merged sandbox commits are untrusted code, like any branch from a stranger: review
+them before you run anything they add, including hook directories (`core.hooksPath`
+settings such as `.husky`), `.envrc` and `.vscode/tasks.json`.
+
+**The clone lives on your disk**, in `${XDG_CACHE_HOME:-~/.cache}/nophi/<repo>-<hash>/workspace`,
+and the sandbox owns it. Never run git, a hook-running tool or an editor there on the host:
+a sandbox can plant git config that runs when git does. `nophi` refuses to start from inside
+that directory. `nophi down` removes the container and the credentials, keeps the clone and
+prints its path; delete the directory when you are done with the repo.
+
+VS Code is outside the clean room: the Dev Containers extension forwards your SSH agent and
+credential helper when it attaches. The [launcher section of
+ARCHITECTURE.md](docs/ARCHITECTURE.md#launcher) has the residuals.
+
+After the container starts, a health check sends a fake-PII canary prompt through the agent and
 starts it only if phi-guard blocks the canary before any model call. That proves the
 hooks are loaded under whatever account is signed in (an org login's managed settings
 can displace them, see [Org logins](docs/ARCHITECTURE.md#org-logins)) and that the
 guardrail answers. Codex runs the canary only when signed in, and otherwise checks the
-guardrail alone. If the check reports a scan error, the usual cause is an expired AWS
-session: run `good-morning` on this machine. `nophi shell` and `nophi codex login` skip
+guardrail alone. If the check reports a scan error, the usual cause is a role that lacks
+`bedrock:ApplyGuardrail` on the guardrail. `nophi shell` and `nophi codex login` skip
 the check. It works before Claude's first-run login.
+
+Before the container starts, `nophi claude` and `nophi codex` mint the sandbox's AWS
+session. If the profile cannot produce a short-lived one (the SSO login expired, the
+profile is missing, `aws` is absent, or the profile holds static keys), they stop and tell
+you to run `good-morning` (`aws sso login`) on this machine. `nophi shell` and
+`nophi codex login` need no AWS and only warn. The session lasts as long as your SSO
+session grants, an hour by default, so rerun `nophi` in any terminal to refresh it: the
+running sandbox sees the new credentials at once. `nophi` keeps them, with the filtered
+npmrc and the bundles, in `${XDG_CACHE_HOME:-~/.cache}/nophi/<repo>-<hash>/` (mode 0700). Closing a session
+leaves them in place, because another terminal may still be using them; `nophi down` deletes
+the credentials file. A sandbox that `docker start` restarts has no firewall until `nophi`
+runs again, so start it through `nophi`.
 
 In a terminal, `nophi` marks the window while the agent runs and restores it on
 exit: the title reads `NO PHI · <repo>`, the background takes a dark red tint (light
@@ -134,9 +190,8 @@ and a NO PHI badge. Claude Code keeps that title (`CLAUDE_CODE_DISABLE_TERMINAL_
 Codex sets its own title; the tint, tab colour and its `phi-guard-sandbox` status line
 remain.
 
-After `brew upgrade nophi`, remove the previous version's containers. List them with
-`docker ps --filter label=devcontainer.config_file`, remove them with `docker rm -f`,
-or use Docker Desktop.
+After `brew upgrade nophi`, `nophi` removes this repo's containers from earlier versions
+at the next launch and says so, because they mounted your whole `~/.aws`.
 
 ## Configuration
 
@@ -147,9 +202,11 @@ or use Docker Desktop.
 | AWS region | `aws_region` | `PHI_GUARD_AWS_REGION` | yes |
 | AWS profile | `aws_profile` | `PHI_GUARD_AWS_PROFILE` | no |
 
-Without a profile the default AWS credential chain applies. The credentials need
-only `bedrock:ApplyGuardrail` on the guardrail (`infra/guardrail.yaml` creates a
-managed policy for it).
+The profile settings serve host installs (a plain plugin install, `pnpm e2e`, `pnpm eval`).
+In the sandbox the profile is a host variable that `nophi` mints a session from, and the
+container sets none. Without a profile the default AWS credential chain applies. The
+credentials need only `bedrock:ApplyGuardrail` on the guardrail (`infra/guardrail.yaml`
+creates a managed policy for it).
 
 ## Testing on a work machine
 
@@ -161,10 +218,12 @@ sandbox signs in on its own login volumes, with any account.
 1. Clone this repo, run `pnpm install`, and `brew install devcontainer`.
 2. Deploy `infra/guardrail.yaml` or reuse an existing guardrail, and refresh AWS on the
    host (`good-morning`).
-3. Export the four `PHI_GUARD_*` variables from the [Configuration](#configuration)
-   table. The profile defaults to `phi-guard`. As an alternative to adding a
-   `[profile phi-guard]` entry, set `PHI_GUARD_AWS_PROFILE` to the work profile that can
-   call `bedrock:ApplyGuardrail` (set but empty selects the default credential chain).
+3. Export the `PHI_GUARD_*` variables from the [Configuration](#configuration)
+   table. `nophi` mints the sandbox's session from the profile `phi-guard` unless
+   `PHI_GUARD_AWS_PROFILE` names another, which must be an SSO or assume-role profile
+   whose role can call `bedrock:ApplyGuardrail` (static keys are refused, and for `nophi` a
+   set but empty value counts as unset). `pnpm e2e` reads the same variable, and
+   for it a set but empty value selects the default credential chain.
 4. Run `pnpm e2e`. With the variables exported it adds six scenarios against the real
    guardrail: LC1 and LX1 (a fake-PII prompt is blocked), LC2 and LX2 (`cat` of a
    fake-PII file is masked), LC3 (Claude's Read of that file is masked) and LC4 (a prompt
@@ -223,7 +282,7 @@ pnpm eval --target keyed=abc123:2 --target all=def456:1   # compare guardrails s
 A target is `<name>=<guardrailId>:<version>` (split on the last colon, so an ARN works).
 Without `--target`, the guardrail comes from `PHI_GUARD_GUARDRAIL_ID` and
 `PHI_GUARD_GUARDRAIL_VERSION`; region and profile come from `PHI_GUARD_AWS_REGION` and
-`PHI_GUARD_AWS_PROFILE` (default `phi-guard`), as in the sandbox. `--concurrency <n>`
+`PHI_GUARD_AWS_PROFILE` (default `phi-guard`), which is nophi's host-side default. `--concurrency <n>`
 defaults to 4. Results go to `evals/results/<timestamp>/results.json` (gitignored) and hold
 case ids, outcomes, finding types and timings, never case text or planted values. The run
 exits non-zero when nothing ran, when any case errors outside the size probes, or when a hook

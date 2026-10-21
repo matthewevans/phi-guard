@@ -27,7 +27,7 @@
     "aws_profile": {
       "type": "string",
       "title": "AWS profile",
-      "description": "Optional AWS profile with bedrock:ApplyGuardrail permission. Leave empty to use the default credential chain."
+      "description": "Optional AWS profile with bedrock:ApplyGuardrail permission, for host installs. Leave empty to use the default credential chain (the sandbox does)."
     }
   }
 }

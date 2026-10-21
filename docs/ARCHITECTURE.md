@@ -15,7 +15,7 @@ and Failure behavior below says where each failure fails open.
 flowchart LR
   dev([Developer])
 
-  subgraph container["Dev container: egress firewall, host ~/.aws and ~/.npmrc read-only, no MCP"]
+  subgraph container["Dev container: egress firewall, one minted ApplyGuardrail-only AWS session and a filtered npmrc read-only, no MCP"]
     cc["Claude Code<br/>(personal subscription)"]
     cx["Codex CLI<br/>(danger-full-access)"]
     ph[["prompt hooks<br/>UserPromptSubmit"]]
@@ -24,7 +24,7 @@ flowchart LR
     rn[["Codex runner<br/>buffer only, offline"]]
     post[["Codex PostToolUse hook<br/>scans the capture"]]
     cap[("Capture file<br/>/tmp/phi-guard-uid")]
-    repo[("Working tree<br/>no PHI committed,<br/>fresh or shallow clone safest")]
+    repo[("Clone built from the host bundle<br/>committed content only")]
   end
 
   subgraph baa["Company AWS account (BAA)"]
@@ -73,6 +73,66 @@ writes the command's stdout and stderr to a capture file and prints one fixed
 marker line. The PostToolUse hook reads the capture, scans it, and replaces the
 marker with the masked text. The runner is offline: it imports no AWS SDK and reads
 no config, because it runs inside Codex's command sandbox. Only the hooks scan.
+
+## Clean room
+
+The claim phi-guard can defend is structural: the sandbox holds no PHI and can reach no
+system that holds PHI. The guardrail is defence in depth for the one channel that cannot
+be closed structurally, a human typing or pasting. This section lists what the sandbox
+holds, what it can reach, how each statement is verified and what remains. It applies to
+terminal `nophi` sessions only; attaching an editor is outside it.
+
+**What the sandbox holds.**
+
+- One AWS session credential, minted by `nophi` for a role whose only permission is
+  `bedrock:ApplyGuardrail` on the guardrail. No SSO token, no `~/.aws/config`, no other
+  role.
+- An npmrc with the CodeArtifact `registry=` lines and those hosts' tokens. No other
+  registry token and no GitHub or SSH credential.
+- Committed content: a clone built from a bundle of the host repo's branches, tags and
+  `HEAD`. No untracked or ignored files, no stash, no unreferenced objects.
+- The personal agent logins on the `phi-guard-claude-config` and `phi-guard-codex-config`
+  volumes, which are separate from the host's `~/.claude` and `~/.codex`.
+
+**What it can reach.** In the default `strict` mode, by IP address: the agent providers,
+GitHub's published ranges, npm and CodeArtifact, and the Bedrock runtime endpoint of the
+configured region, plus the resolvers in the container's `/etc/resolv.conf` and the host's
+/24. Everything else, including private ranges, is rejected. `web` and `off` are explicit
+opt-ins that widen this (see Firewall modes).
+
+**How each statement is checked.**
+
+| Statement | Evidence |
+|---|---|
+| The credential can only call `ApplyGuardrail` | The IAM policy document (`ApplyGuardrailPolicy` in `infra/guardrail.yaml`). `nophi` cannot prove a profile is least-privilege |
+| Egress is limited to the allowlist | The firewall's rule output at container start, and its argument pin: a later run with other arguments exits before touching a rule (see Container table) |
+| The image holds what the Dockerfile says | The image is built from `.devcontainer/Dockerfile`; managed settings, `requirements.toml`, the firewall and the hooks are root-owned |
+| Only committed content entered | `nophi` runs `git bundle create --branches --tags HEAD` in the host repo; the sandbox clones from that file |
+| What comes back is untampered by redirection | The host copies one file out of the sandbox-writable `out/` and trusts only the copy, after checking it is a regular file starting with a bundle signature. The host repo's `nophi` remote points at that copy with `--no-tags` |
+
+**Residuals.**
+
+- Keyboard paste and images: a human can type or paste PHI into a prompt, and no hook sees
+  an image. The hooks are the only layer there, and detection is limited.
+- Same-uid tampering and `LD_PRELOAD`: the agent runs as the same user as the hooks (see
+  Same-uid tampering).
+- `web` and `off`: an engineer who opts in accepts the wider reach those modes document.
+- Repo history and LFS: the bundle carries every reachable commit, so PHI committed in the
+  past enters. LFS pointers enter without their objects.
+- CodeArtifact token scope: the token reaches whatever its own permissions allow.
+- Network: the host's /24; shared CDN and object-store addresses behind an IP allowlist,
+  which admit other tenants of those addresses; allowlist IPs that went stale; recursive DNS
+  through the allowed resolver, a low-bandwidth channel to any domain's name servers; IPv6,
+  which the firewall does not filter if the Docker network provides it (see the IPv4 only
+  row in the Container table).
+- `nophi` cannot prove least privilege; the IAM policy document is the proof.
+- Merged sandbox commits are untrusted code. The host runs nothing from the sandbox until
+  the engineer merges its commits, and then hook directories, `.envrc` and
+  `.vscode/tasks.json` run with the engineer's credentials.
+- A container created without `nophi` never starts, because its mount sources are missing.
+  A `nophi` container restarted with `docker start` has no firewall until `nophi` runs it
+  again; its credentials, if not yet deleted, allow `ApplyGuardrail` only.
+- Nested repos and submodules are not bundled, so they are not in the sandbox.
 
 ## Request flow
 
@@ -184,9 +244,9 @@ PostToolUse scans `tool_response` directly.
 |---|---|---|---|
 | Live systems at private addresses (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16), such as internal DBs and VPN-only tools on private IPs | Container egress firewall | Covered, for IPv4, in web and strict modes | Covered, for IPv4, in web and strict modes |
 | Public SaaS (Jira cloud, Datadog) | Container egress firewall, and the container holds no credentials for them | Reachable in web mode, covered in strict mode | Reachable in web mode, covered in strict mode |
-| Host secrets and config other than the mounted `~/.aws` and `~/.npmrc` (`~/.ssh`, MCP config) | Container boundary | Covered | Covered |
-| PHI data stores reached with the mounted AWS credentials | In strict mode the egress firewall, then the credentials' own permissions | Reachable in web mode with the mounted credentials, so the credentials' permissions govern access. Covered in strict mode, for IPv4, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` | Same as Claude Code |
-| Committed fixtures and history | Policy: no PHI committed; a fresh or shallow clone is safest | Covered by policy | Covered by policy |
+| Host secrets and config other than the exchange directory's two credential files (`~/.ssh`, the host `~/.aws` and its SSO token, MCP config) | Container boundary | Covered | Covered |
+| PHI data stores reached with the sandbox's AWS credential | The credential itself, one session for a role whose only permission is `bedrock:ApplyGuardrail` on the guardrail, then in strict mode the egress firewall | Covered by the role's permissions in every mode, if the role is least-privilege (the IAM policy document is the proof, and `nophi` cannot check it). In strict mode also covered by the firewall, for IPv4, unless the store's host is listed in `PHI_GUARD_EXTRA_HOSTS` | Same as Claude Code |
+| Committed fixtures and history | Policy: no PHI committed. Only committed, reachable content enters the sandbox (a bundle of branches, tags and `HEAD`), so untracked and ignored files, the stash and unreferenced objects stay on the host | Covered by policy | Covered by policy |
 | Text the developer types or pastes | Prompt hook (block) | Covered, limited by detection | Covered, limited by detection |
 | Command output (tests, scripts) | Output hook (mask) | Covered for the `Bash` tool, limited by detection | Covered for the `Bash` tool through the wrapper, limited by detection |
 | Files read with the Read or Grep tool | File output hook (mask) | Covered for the file text, limited by detection. File names in Grep and Glob results are not scanned | A file read through a shell command is command output and is scanned. No claim is made for other read paths |
@@ -213,19 +273,27 @@ section says how to set it.
 
 | Value | Egress |
 |---|---|
-| `web` (default) | Any public IPv4 address. After the DNS, SSH, loopback and host-network accepts, the firewall rejects `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and `169.254.0.0/16` (the last holds the cloud metadata service), then accepts all other outbound traffic. Web searches, WebFetch and `curl` to public sites work. It makes no DNS lookups for an allowlist and reads no region, so it needs no guardrail configuration. Its self-test expects `https://api.github.com/zen` to answer and `http://169.254.169.254/` to fail |
-| `strict` | An allowlist: GitHub's published ranges, `registry.npmjs.org`, the Anthropic hosts (`api.anthropic.com`, `claude.ai`, `claude.com`, `platform.claude.com`), the OpenAI hosts Codex needs (`api.openai.com`, `chatgpt.com`, `auth.openai.com`), `bedrock-runtime.<region>.amazonaws.com`, `sts.<region>.amazonaws.com` and the VS Code hosts from the reference. Hosts derived from the mounted credential files and every `PHI_GUARD_EXTRA_HOSTS` entry are added (see the Container table). The Sentry and Statsig telemetry hosts from the reference are dropped. Codex hosts seen rarely in its source (`ab.chatgpt.com`, `files.openai.com`) are not allowed, and Part 2 checks whether Codex login needs them. A listed host is reachable with all of the mounted credentials |
+| `web` | Any public IPv4 address. After the DNS, SSH, loopback and host-network accepts, the firewall rejects `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` and `169.254.0.0/16` (the last holds the cloud metadata service), then accepts all other outbound traffic. Web searches, WebFetch and `curl` to public sites work. It makes no DNS lookups for an allowlist and reads no region, so it needs no guardrail configuration. Its self-test expects `https://api.github.com/zen` to answer and `http://169.254.169.254/` to fail |
+| `strict` (default) | An allowlist: GitHub's published ranges, `registry.npmjs.org`, the Anthropic hosts (`api.anthropic.com`, `claude.ai`, `claude.com`, `platform.claude.com`), the OpenAI hosts Codex needs (`api.openai.com`, `chatgpt.com`, `auth.openai.com`) and `bedrock-runtime.<region>.amazonaws.com`. Hosts derived from the mounted npmrc (the CodeArtifact registries) and every `PHI_GUARD_EXTRA_HOSTS` entry are added (see the Container table). The reference's Sentry and Statsig telemetry hosts are dropped, and so are the VS Code hosts, because only terminal `nophi` sessions are supported. There is no STS or SSO host, since nothing in the container performs SSO or calls STS. DNS (UDP and TCP 53) goes only to the IPv4 nameservers in the container's `/etc/resolv.conf`, and there is no blanket SSH accept: SSH reaches only allowlisted addresses and the host network. Codex hosts seen rarely in its source (`ab.chatgpt.com`, `files.openai.com`) are not allowed, and Part 2 checks whether Codex login needs them. A listed host is reachable with the sandbox's one credential |
 | `off` | No firewall. The live-systems rows above become the user's responsibility |
 
-The design treats public web traffic as PHI-free, and treats accidental PHI access
-through AWS as very hard in the intended setup. The hooks never read
-`PHI_GUARD_FIREWALL`. `devcontainer.json` passes it from the host environment into
-the container, default `web`, and the value is fixed when the container is created.
+Strict is the default. `web` is an explicit opt-in that treats public web traffic as
+PHI-free, and the sandbox's one credential makes accidental PHI access through AWS very
+hard in every mode. The hooks never read `PHI_GUARD_FIREWALL`. `devcontainer.json` passes
+it from the host environment into the container, default `strict`, and the value is fixed
+when the container is created.
 The exact value `off` makes `postStartCommand` skip the firewall script. Any other
 value goes to the script as its first argument (`PHI_GUARD_EXTRA_HOSTS` is the
 second). The script accepts only `web` and `strict` and exits before it changes a
 rule on anything else. The firewall writes no IPv6 rules (see the IPv4 only row in
 the Container table).
+
+The script pins both arguments. The first run writes the mode and the extra-hosts string
+to `/etc/phi-guard/firewall-args` (root-owned, in the container layer, so it survives
+`docker start` and `--rebuild` discards it), and a later run with different arguments exits
+before it touches a rule. Identical arguments continue, which is how the script runs at
+every container start. In strict mode the script also reads the nameservers from
+`/etc/resolv.conf` and exits when there is no IPv4 one, before it flushes anything.
 
 Strict mode resolves DNS once, when the script starts. To refresh the allowlist after
 an IP rotation, restart the container: `postStartCommand` re-runs the script in a
@@ -310,21 +378,22 @@ Container:
 
 | Residual | Effect and breadth |
 |---|---|
-| AWS endpoint IPs rotate (strict mode) | The strict firewall resolves DNS once, when it starts. After a rotation the Bedrock and STS calls fail, so the hooks fail closed (prompts blocked, output withheld) until the container is restarted. A stale allowlist entry can also point at an address another party now uses (inferred, not verified) |
-| Strict mode needs a real region | It reads `aws_region` from the managed Claude settings, which the image build writes from `PHI_GUARD_AWS_REGION` (the build fails when it is empty). The script exits before changing any rule if the value is not a region name or does not resolve, and then the strict container runs without a firewall. Web mode does not read the region. A wrong but well-formed region makes every scan fail, so the hooks fail closed |
+| AWS endpoint IPs rotate (strict mode) | The strict firewall resolves DNS once, when it starts. After a rotation the Bedrock calls fail, so the hooks fail closed (prompts blocked, output withheld) until the container is restarted. A stale allowlist entry can also point at an address another party now uses (inferred, not verified) |
+| Strict mode needs a real region and a resolver | It reads `aws_region` from the managed Claude settings, which the image build writes from `PHI_GUARD_AWS_REGION` (the build fails when it is empty). The script exits before changing any rule if the value is not a region name or does not resolve, or if `/etc/resolv.conf` has no IPv4 nameserver, and then the strict container runs without a firewall. Web mode reads neither. A wrong but well-formed region makes every scan fail, so the hooks fail closed |
 | The firewall script fails midway | It flushes the rules, then (in strict mode) resolves hosts, then switches the default policies to DROP. A failure in between leaves egress open until a later run succeeds |
 | IPv4 only | The firewall writes no IPv6 rules. If the Docker network gives the container IPv6, all IPv6 egress is unfiltered. Docker's default bridge has no IPv6 |
-| Reference firewall rules that stay | Outbound DNS (UDP 53) to any resolver, outbound SSH (TCP 22) to any host, and the host's /24 network are allowed, as in Anthropic's reference. In web mode these accepts come before the private-range rejects, so DNS and SSH also reach private addresses, and the host's /24 stays reachable although it usually sits inside a rejected range |
+| Reference firewall rules that stay | In web mode, outbound DNS (UDP 53) to any resolver and outbound SSH (TCP 22) to any host stay, as in Anthropic's reference, and they come before the private-range rejects, so DNS and SSH also reach private addresses. In both modes the host's /24 network is allowed, although it usually sits inside a rejected range. In strict mode DNS goes only to the resolvers in `/etc/resolv.conf` and SSH only to the allowlist and the host's /24 |
+| DNS through the allowed resolver (strict mode) | The resolver recurses for any name, so a lookup of `<data>.attacker.example` reaches that domain's name servers: a low-bandwidth channel to any domain. The `lo` accepts that Docker's embedded resolver at 127.0.0.11 needs stay. Closing this needs a filtering resolver, which is out of scope |
 | VPN-gated services at public addresses (web mode) | A service that admits the VPN's source IP at a public address, or an internal name that resolves to a public address, is reachable when the host routes container traffic through its VPN. Its own authentication is then the only gate. Strict mode blocks it |
 | Web mode allows any public host | A tool or agent can send data to any public site. That matters only if PHI reached the context, which is what the hooks prevent. Public SaaS is reachable, and the container holds no credentials for it |
-| The agent can switch firewall modes | `node` may run `sudo /usr/local/bin/init-firewall.sh` with any argument, so the agent can re-run it as `strict` or `web`. This takes deliberate action and belongs to the same-uid class (see [Same-uid tampering](#same-uid-tampering)) |
+| The firewall arguments are pinned | `node` may run `sudo /usr/local/bin/init-firewall.sh` with any argument, but the script records its first arguments in the root-owned `/etc/phi-guard/firewall-args` and a run with different ones exits before it changes a rule. The agent can therefore neither switch a strict container to `web` nor widen the allowlist through the extra-hosts argument. A run with the same arguments rebuilds the same rules. The script's two test overrides (`FIREWALL_ARGS`, `RESOLV_CONF`) cannot be passed through sudo: the image keeps `Defaults env_reset` (checked in the built image) and the sudoers rule has no `SETENV`. A container created with `PHI_GUARD_FIREWALL=off` never runs the script at start and so has no pin, and its egress is open anyway |
 | `PHI_GUARD_FIREWALL=off` | No egress boundary at all. A value other than `web`, `strict` and `off` makes the script exit before it changes a rule, which leaves the container without a firewall and `postStartCommand` failing (see Firewall modes) |
-| `/home/node` is writable by the agent | This covers agent state and any shell startup files. `~/.aws` and `~/.npmrc` are read-only mounts (see the next rows). Endpoint redirection through a profile's `endpoint_url` or `AWS_ENDPOINT_URL*` is neutralised by endpoint pinning |
-| The agent can read the engineer's AWS and npm credentials | `devcontainer.json` mounts the host `~/.aws` (every profile, SSO token cache and any static keys in it) and `~/.npmrc` (registry tokens). Everything the engineer's credentials can do is available to the agent, not only `bedrock:ApplyGuardrail`. In web mode any public AWS endpoint, including PHI data stores, is reachable with those credentials, and their permissions are the only limit. In strict mode egress reaches the allowlist (see Firewall modes) plus the reference DNS, SSH and host-network rules. With `PHI_GUARD_FIREWALL=off` the credentials reach any AWS service, including PHI data stores. A token the agent reads, for example while debugging npm auth, lands in the model provider's transcript |
-| Read-only credential mounts | Both mounts are `readonly`, so the agent cannot edit the host's `~/.aws/config` or `~/.npmrc`, for example to plant a `credential_process` that a host tool later runs. The bundled AWS SDK ignores SSO token-cache write errors (from its source, not run against a real SSO session), so a token refresh inside the container works without persisting |
-| Derived firewall hosts are read at start (strict mode) | The strict firewall reads `portal.sso.<region>` and `oidc.<region>` for each `sso_region` in `~/.aws/config`, the host of each CodeArtifact `registry=` URL in `~/.npmrc`, and the hostnames in `PHI_GUARD_EXTRA_HOSTS`. Entries that are not valid are skipped with a warning, and a host that does not resolve is skipped with a warning. All of this is read once, when the script starts, so changes to `~/.aws/config` or `~/.npmrc` need a container restart. `PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created |
-| Expired AWS session | The scan fails with bad credentials, so prompts are blocked and output is withheld (fail closed) until the engineer refreshes the session on the host |
-| Repo-shipped enforcement | `.devcontainer/` (managed settings, `requirements.toml`, `init-firewall.sh`, `devcontainer.json`) and `dist/` live in `/workspace`, which the agent and anyone with repo write access can edit. Edits take effect at the next container start or rebuild and can remove the hooks, the managed settings or the firewall, including by changing `PHI_GUARD_FIREWALL`, and an edited `initializeCommand` runs on the host. Review `.devcontainer/` and `dist/` changes before rebuilding. Policy that engineers must not bypass belongs in server-managed settings or MDM |
+| `/home/node` is writable by the agent | This covers agent state and any shell startup files. The credential files at `~/.aws` and `~/.npmrc` are read-only mounts (see the next rows). Endpoint redirection through a profile's `endpoint_url` or `AWS_ENDPOINT_URL*` is neutralised by endpoint pinning |
+| The agent can read the sandbox's credentials | `devcontainer.json` mounts the launcher's exchange directory read-only: `in/aws` at `~/.aws`, holding one `credentials` file with a session for the `ApplyGuardrail` role, and `in/npmrc` at `~/.npmrc`, holding only CodeArtifact `registry=` lines and those hosts' tokens. The host `~/.aws` (profiles, SSO token cache) is never mounted, so no other role is reachable. The agent can use the session for `bedrock:ApplyGuardrail` on the guardrail until its `Expiration` (an hour by default; `nophi down` deletes the file, closing a session does not). `nophi` cannot prove the profile is least-privilege, and the IAM policy document (`ApplyGuardrailPolicy`) is the proof. The CodeArtifact token reaches whatever its own permissions allow. A credential the agent reads or prints, for example while debugging npm auth, lands in the model provider's transcript |
+| Read-only credential mounts | Both mounts are `readonly`, so the agent cannot edit the credentials or the npmrc. The sandbox has no `~/.aws/config`, so there is no `credential_process` to plant and no SSO token cache. `nophi` refreshes the credentials by writing a temp file inside `in/aws` and renaming it, which a running container sees through the directory mount, and each hook is a fresh process that reads the file again. `in/npmrc` is a file mount, so `nophi` rewrites it in place, because a rename would leave a reused container holding the old inode |
+| Derived firewall hosts are read at start (strict mode) | The strict firewall reads the host of each CodeArtifact `registry=` URL in the mounted npmrc and the hostnames in `PHI_GUARD_EXTRA_HOSTS`. Entries that are not valid are skipped with a warning, and a host that does not resolve is skipped with a warning. All of this is read once, when the script starts, so a changed `~/.npmrc` needs a container restart. `PHI_GUARD_EXTRA_HOSTS` is fixed when the container is created, and the script pins it |
+| Expired AWS session | `nophi claude` and `nophi codex` stop at launch when the host profile cannot mint a session. A session that expires while the sandbox runs makes the scan fail with bad credentials, so prompts are blocked and output is withheld (fail closed) until the engineer reruns `nophi` |
+| Repo-shipped enforcement | `bin/nophi` runs on the host from its own payload (a checkout of this repo, or the Homebrew libexec copy), and the image is built from that payload's `.devcontainer/`, so a repo being worked on does not supply its own enforcement. The working tree is no longer mounted. An edited payload (`bin/nophi`, `devcontainer.json`, an added `initializeCommand`) runs on the host with the engineer's credentials at the next launch. An editor's "Reopen in Container" on a repo runs that repo's `initializeCommand` on the host before Docker rejects the missing `NOPHI_EXCHANGE` mount sources. Sandbox commits merged on the host are untrusted code. Review payload changes before running `nophi` from a modified checkout. Policy that engineers must not bypass belongs in server-managed settings or MDM |
 | Same-uid tampering | Anything that runs as uid `node`, and any repo or user settings `env`, can make the hooks fail open (both agents). See [Same-uid tampering](#same-uid-tampering) |
 | Reference devcontainer license | The Dockerfile, `devcontainer.json` and `init-firewall.sh` are adapted from Anthropic's reference (© Anthropic PBC, subject to Anthropic's Commercial Terms of Service). Attribution is kept in each file header and in `.devcontainer/LICENSE-anthropic-reference.md` |
 
@@ -340,15 +409,15 @@ Container table link here for this class.
 - **Claude Code.** Demonstrated: project `.claude/settings.json` `env.LD_PRELOAD`,
   which needs only a committed repo file, and `PATH` and `NODE_OPTIONS` before they
   were pinned. Likely, not run: `env` `AWS_CONFIG_FILE` or credential variables
-  pointing at another account's guardrail, user-level agent config, and a killed hook
-  process. A substituted `node` that exits 0 with no output is not a failure.
+  pointing at a guardrail the agent controls (the sandbox holds no host `~/.aws/config`
+  to redirect to), user-level agent config, and a killed hook process. A substituted `node` that exits 0 with no output is not a failure.
 - **Codex.** Killing a hook's `node` process trips the exit-2 guard and fails closed.
   Killing the hook's shell fails open for that one prompt or command.
   `[features] hooks = false` in a user `config.toml` turns off all three hooks for
   every later session (the container pins `hooks = true` in `requirements.toml`). A
   `PATH` prepend or a startup file changes which `node` runs (see the shell startup
   files row of the Codex residuals). Likely, not run: `AWS_CONFIG_FILE` or credential
-  variables pointing at another account's guardrail.
+  variables pointing at a guardrail the agent controls.
 - **Container.** Managed Claude `env` pins `PATH` and `NODE_OPTIONS` and closes those
   two variables only. The environment is not locked down: other variables, such as
   `LD_PRELOAD` in a project's `.claude/settings.json` `env`, still reach the hooks.
@@ -475,8 +544,8 @@ stubs, because no Codex login was available in Part 2.
 - **Ownership.** The CLIs (a root-owned global npm prefix), `/opt/phi-guard`,
   `/etc/claude-code`, `/etc/codex` and `/etc/zsh` are root-owned, so the agent
   cannot rewrite them. `/home/node` (shell startup files, agent state) and
-  `/workspace` are writable by the agent. The mounted `~/.aws` and `~/.npmrc` are
-  read-only.
+  `/workspace` are writable by the agent. `/etc/phi-guard`, which holds the firewall's
+  pin file, is root-owned too. The mounted `~/.aws` and `~/.npmrc` are read-only.
 - **Login volumes.** `devcontainer.json` mounts the fixed-name volumes
   `phi-guard-claude-config` and `phi-guard-codex-config` at `/home/node/.claude` and
   `/home/node/.codex`. One sandbox login per machine is shared by every repo's
@@ -488,7 +557,7 @@ stubs, because no Codex login was available in Part 2.
   Codex terminal title is `activity` and `project-name` because the title has no
   hostname item. Managed settings point Claude Code's `statusLine` at the root-owned
   `/opt/phi-guard/statusline.sh`, which prints `NO PHI`, the subscription note and
-  `PHI_GUARD_FIREWALL` (`web` when unset). `/opt/phi-guard/sandbox-banner.sh` is
+  `PHI_GUARD_FIREWALL` (`strict` when unset). `/opt/phi-guard/sandbox-banner.sh` is
   appended as a source line to `/etc/zsh/zshrc` and `/etc/bash.bashrc`. In interactive
   shells it prints a three-line banner that opens with `NO PHI IN THIS SANDBOX.` and
   prefixes the prompt with `[NO PHI] `. Bash
@@ -505,17 +574,23 @@ stubs, because no Codex login was available in Part 2.
   bubblewrap. `allowed_sandbox_modes` lists `read-only` and `danger-full-access`
   (Codex rejects a list without `read-only`). Read-only stays selectable and fails
   closed, as the Codex table says.
-- **Host credentials.** `initializeCommand` creates `~/.aws` and an empty `~/.npmrc`
-  on the host when they are missing, because Docker refuses to start a container whose
-  bind source does not exist. `devcontainer.json` then mounts both read-only. The
-  profile named by `aws_profile` lives in the engineer's own `~/.aws/config`, and the
-  engineer refreshes sessions on the host (see the README's Install section).
+- **Sandbox credentials.** The host's `~/.aws` and `~/.npmrc` are never mounted, and
+  `devcontainer.json` has no `initializeCommand`. It mounts the launcher's exchange
+  directory (`${localEnv:NOPHI_EXCHANGE}`, exported by `nophi`): `in/aws` read-only at
+  `~/.aws`, `in/npmrc` read-only at `~/.npmrc`, `in` read-only at `/nophi/in`, `out` at
+  `/nophi/out`, and `workspace` as `/workspace` (`workspaceMount`; `workspaceFolder` stays
+  set too, because the devcontainer CLI runs host git in the workspace folder when either is
+  missing). `nophi` mints the one session
+  credential on the host (see Launcher), and the hooks find it through the default
+  credential chain, so the image configures no profile and `PHI_GUARD_AWS_PROFILE` is a
+  host variable only. A container started without `nophi` has no `NOPHI_EXCHANGE`, its mount
+  sources do not exist, and it never starts.
 - **Guardrail values.** The public repo commits none. `devcontainer.json` passes
-  `PHI_GUARD_GUARDRAIL_ID`, `PHI_GUARD_GUARDRAIL_VERSION`, `PHI_GUARD_AWS_REGION` and
-  `PHI_GUARD_AWS_PROFILE` (default `phi-guard`) from the host environment as build
-  args. At the end of the Dockerfile a `RUN` fails the build when one of the first
-  three is empty (it names the variables, never the values), a second `RUN` writes the
-  Claude `pluginConfigs` options into the root-owned managed settings with `jq`, and
+  `PHI_GUARD_GUARDRAIL_ID`, `PHI_GUARD_GUARDRAIL_VERSION` and `PHI_GUARD_AWS_REGION`
+  from the host environment as build args. At the end of the Dockerfile a `RUN` fails the
+  build when one is empty (it names the variables, never the values), a second `RUN`
+  writes the three Claude `pluginConfigs` options (no `aws_profile`) into the root-owned
+  managed settings with `jq`, and
   `ENV` lines give Codex the same values. Every way of building the image passes through
   that check, so no image ships with empty options. `test/devcontainer.test.ts`
   checks that the option keys, build args and `ENV` lines use the same names.
@@ -534,17 +609,91 @@ stubs, because no Codex login was available in Part 2.
 `bin/nophi` wraps the `devcontainer` CLI around `.devcontainer/devcontainer.json`, which
 stays the single source for mounts, capabilities, the firewall and env. It resolves the
 payload directory through symlinks (a Homebrew install links into `libexec`), so the
-`devcontainer.config_file` label on the container is the normalised absolute path that
-`nophi down` filters on. `Formula/nophi.rb` installs the payload files the Dockerfile
-copies plus `bin/`, so the repo doubles as its own Homebrew tap.
+config path it passes is absolute. `Formula/nophi.rb` installs the payload files the
+Dockerfile copies plus `bin/`, and declares `awscli` and `jq`, so the repo doubles as its
+own Homebrew tap.
+
+- **Exchange directory.** `nophi` owns
+  `${XDG_CACHE_HOME:-$HOME/.cache}/nophi/<repo name>-<first 8 hex of the SHA-1 of the repo root>/`
+  (mode 0700 on every directory) and exports it as `NOPHI_EXCHANGE` before any
+  `devcontainer` call. Under `in/` it writes `aws/credentials` (0600) and `npmrc` (0600), both
+  as plain files. It never executes, follows or parses anything the sandbox wrote there.
+- **Minting.** For `claude` and `codex`, before `up`, `nophi` runs `aws configure
+  export-credentials --profile <p> --format process`, with `<p>` taken from
+  `PHI_GUARD_AWS_PROFILE` (unset or empty means `phi-guard`), and pipes the JSON through
+  `jq` into a temp file in `in/aws` that it renames to `credentials`. The conversion
+  requires `SessionToken` and `Expiration` as well as the key pair, which refuses long-lived
+  static keys. The values travel through the pipe only: not argv, not the launcher log, not
+  the terminal. A failed export stops the launch with a hint to run `good-morning` (`aws sso
+  login`), and no credentials file is written. For `shell` and `codex login` it warns and
+  continues. Credentials are deleted by `nophi down`, not when a session exits, because a
+  second `nophi` in another terminal (the documented refresh, and `shell`) would otherwise
+  strip a running session.
+- **npmrc filter.** At every launch `nophi` rewrites `in/npmrc` in place from the host
+  `~/.npmrc`, keeping the `registry=` and `@scope:registry=` lines whose host matches
+  the CodeArtifact pattern, and the `//<that host>/...:_authToken=` lines for those hosts.
+  It gets the hosts from the firewall script's own parser, sourced in a subshell (the
+  script's guard returns before any rule). Everything else, such as another registry's token
+  or a GitHub Packages PAT, stays on the host. A missing `~/.npmrc` gives an empty file.
+- **Id labels and legacy containers.** New containers carry the labels `nophi.schema=3`
+  and `nophi.repo=<repo root>`. In devcontainer CLI 0.89.0 id labels replace the default
+  `devcontainer.local_folder` and `config_file` labels, so `up`, `exec` and `remove_containers`
+  all use them. The CLI reuses a container on a label match alone and never compares
+  mounts, so a container made before the exchange mounts can never be reused. At every
+  launch, and on `down`, `nophi` also removes this repo's containers that carry only the
+  default labels and whose `config_file` label is this payload's config or matches
+  `*/nophi/*/libexec/.devcontainer/devcontainer.json` (earlier Homebrew versions), which
+  mounted the whole host `~/.aws`. It says so on stderr. Failing to remove one is fatal
+  for `down` and a warning at launch.
+- **Bundle in.** After the npmrc filter and before `up`, `nophi` refuses a repo with no
+  commits (checked before minting) and runs `git bundle create --branches --tags HEAD` in the
+  repo into `in/host.bundle` (written as a temp file, then renamed). It records the current
+  branch, or the commit id for a detached checkout, and notes once when the working tree has
+  uncommitted changes. This is the only git the launcher runs, and it runs `-C "$root"` in
+  the engineer's repo. The launcher also refuses to start with its working directory inside
+  the cache directory, before any git call, because git run in the sandbox-owned clone would
+  execute config the sandbox planted (`core.fsmonitor`, hooks, `uploadpack`).
+- **Sync in.** After the health check, `devcontainer exec ... sync.sh in <ref>` runs
+  `/opt/phi-guard/sync.sh` in the container. On the first run (HEAD unborn) it runs `git init`,
+  adds a remote `host` pointing at the bundle and fetches branches, tags and `HEAD` from it
+  (tracking needs a configured remote, and a fetch from a bare path configures none), then
+  checks out the recorded branch tracking `host/<branch>`, or the commit detached. Later runs
+  refresh `host/*` and the tags, leave the checkout and local branches alone, and print the
+  branches that moved. A failure stops the launch.
+- **Sync out.** After the agent or shell exits, `sync.sh out` writes `out/sandbox.bundle`
+  (branches, tags and `HEAD`). The host copies that file to `returned.bundle` in the exchange
+  root (never mounted) only if the source is a regular, non-symlink file, accepts the copy
+  only if it is again a regular file whose first line is `# v2 git bundle` or `# v3 git bundle`
+  (checked on the copy, so the sandbox cannot swap the file between check and use), and points
+  the remote `nophi` of the repo at it. The remote has `tagOpt=--no-tags`, so sandbox tags
+  never reach `refs/tags` or the next bundle, and its fetch refspecs are
+  `+refs/heads/*:refs/remotes/nophi/*` and `+HEAD:refs/remotes/nophi/HEAD`. A symlink or a
+  `gitdir:` pointer is rejected, because a bundle fetch would otherwise let the sandbox name
+  another host repository. Every step ends in a warning, never in a failure: the agent's exit
+  status is kept. The only exchange file the host parses is the validated copy. The host
+  never runs git, hooks or any program inside `workspace/` or from `out/`.
+- **Down.** `nophi down` deletes `in/aws/credentials` first, then removes the containers, and
+  prints the exchange path. The clone stays there.
 
 Residuals:
 
-- **Data-file stop.** It matches file extensions only, on untracked and gitignored files.
-  `--i-checked-no-phi` skips it. Tracked files are not checked. Renamed or extensionless
-  exports pass, and so do compressed exports (`.gz`, `.zip`), files inside nested git
-  repos or submodules (`git ls-files` does not list them), and PHI inside a source
-  file. It guards against forgetting, and a determined bypass is out of scope.
+- **Repo history and LFS.** The bundle carries every reachable commit, so PHI committed in
+  the past enters the sandbox. LFS pointers enter without their objects. Tracked data files
+  are the repo's own problem.
+- **Nested repos and submodules.** They are not bundled, so they are absent from the sandbox.
+- **The clone is a host directory.** It sits in the cache directory with the engineer's
+  permissions. Opening it in an editor, or running git or a build tool there, runs whatever
+  the sandbox planted. `nophi` only refuses to start from inside it.
+- **Ctrl-C skips sync out.** An interrupted session (exit 130) returns nothing, and the next
+  session's exit sends the commits. A killed `nophi` does the same.
+- **The sandbox can break its own return path.** A bundle without `HEAD`, or no bundle, makes
+  `git fetch nophi` fail loudly and exposes nothing, and swapping `out/sandbox.bundle` for a
+  FIFO hangs `nophi` at exit until Ctrl-C (denial of service only).
+- **Merged sandbox commits are untrusted code.** `git fetch nophi` parses only the validated
+  bundle copy, but once the engineer merges a sandbox branch, hook directories
+  (`core.hooksPath` settings such as `.husky`), `.envrc` and `.vscode/tasks.json` run on the host.
+- **Editors.** The VS Code Dev Containers extension forwards the SSH agent and the credential
+  helper when it attaches, so attaching is outside the clean room.
 - **Health check.** `/opt/phi-guard/health-check.sh` runs before the agent starts. For
   Claude it sends a fake-PII canary through the real CLI (see [Org logins](#org-logins)),
   so it proves the hooks load and the guardrail answers. For Codex it sends one benign
@@ -559,13 +708,25 @@ Residuals:
 - **Fail-open: a container started by other means.** The devcontainer CLI records that
   `postStartCommand` (the firewall) ran before it runs it. After a failed firewall start
   that container would skip the firewall on the next `devcontainer up`. `nophi` removes
-  the labelled containers when `up` fails, which closes this for its own launches. An
+  the containers with its id labels when `up` fails, which closes this for its own launches. An
   interrupt (Ctrl-C) during `devcontainer up` can still leave a container whose
   postStart marker is written; `nophi --rebuild` or `nophi down` clears it. A
   container someone starts with the devcontainer CLI or an editor, and that failed
   there, can still be reused without a firewall.
-- **Upgrades.** `brew upgrade` leaves containers of the previous version running with
-  their old image and config until they are removed.
+- **Restarted and hand-made containers.** A container created without `nophi` has no
+  `NOPHI_EXCHANGE`, its mount sources do not exist, and it never starts. A `nophi`
+  container restarted with `docker start` keeps its mounts and the last minted credentials
+  (valid up to their `Expiration`, `ApplyGuardrail` only) and has **no firewall** until
+  `nophi` runs it again, because iptables state lives in the network namespace and
+  `postStartCommand` runs only through the devcontainer CLI.
+- **Credential lifetime.** A session leaves the credentials file in place until `nophi down`
+  or the next launch overwrites it. The exposure is bounded by `Expiration`, one hour by
+  default.
+- **Legacy removal.** It matches only this payload's config path and the Homebrew
+  pattern. A container that another checkout of the payload created at a different path
+  stays until someone removes it. The old images stay too.
+- **Least privilege.** `nophi` mints from whatever profile it is given and cannot prove
+  the role is least-privilege. The IAM policy document is the proof.
 
 ## Detection limits
 
@@ -701,11 +862,12 @@ live ones included) and `pnpm eval` against guardrails deployed from
    throttling at normal sizes (see [Evals](#evals)). The over-quota behaviour is in
    [Detection limits](#detection-limits). Codex hook latency was not timed. Its scans
    are at most 20 KB and the live Codex scenarios passed, so it is likely similar.
-6. **The host-credential setup. Partly settled.** A host SSO session, read through the
-   read-only `~/.aws` mount in web mode, answered every scan in the container. Still
-   open: a token refresh inside the container, strict mode's `portal.sso` and `oidc`
-   hosts, CodeArtifact npm installs, a host tool that replaces `~/.npmrc` rather than
-   editing it, and the files' readability by uid `node` on a Linux host.
+6. **The host-credential setup. Settled for the earlier design, superseded.** A host SSO
+   session, read through the read-only `~/.aws` mount in web mode, answered every scan in
+   the container. The sandbox no longer mounts the host `~/.aws` (see Devcontainer notes,
+   Sandbox credentials). Open for the exchange-directory design: a minted session
+   answering scans in a live container, CodeArtifact npm installs with the filtered
+   token, and the readability of the 0600 exchange files by uid `node` on a Linux host.
 7. **The role check. The probe does not work.** `apply-guardrail` with a well-formed
    guardrail ID that does not exist returns `ValidationException` (the guardrail does not
    exist), not `AccessDeniedException`, so Bedrock looks the guardrail up before it

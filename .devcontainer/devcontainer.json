@@ -11,8 +11,7 @@
       "TZ": "${localEnv:TZ:America/Los_Angeles}",
       "PHI_GUARD_GUARDRAIL_ID": "${localEnv:PHI_GUARD_GUARDRAIL_ID}",
       "PHI_GUARD_GUARDRAIL_VERSION": "${localEnv:PHI_GUARD_GUARDRAIL_VERSION}",
-      "PHI_GUARD_AWS_REGION": "${localEnv:PHI_GUARD_AWS_REGION}",
-      "PHI_GUARD_AWS_PROFILE": "${localEnv:PHI_GUARD_AWS_PROFILE:phi-guard}"
+      "PHI_GUARD_AWS_REGION": "${localEnv:PHI_GUARD_AWS_REGION}"
     }
   },
   "runArgs": ["--cap-add=NET_ADMIN", "--cap-add=NET_RAW", "--hostname=phi-guard-sandbox"],
@@ -34,20 +33,21 @@
     }
   },
   "remoteUser": "node",
-  "initializeCommand": "mkdir -p \"$HOME/.aws\" && touch \"$HOME/.npmrc\"",
   "mounts": [
     "source=phi-guard-claude-config,target=/home/node/.claude,type=volume",
     "source=phi-guard-codex-config,target=/home/node/.codex,type=volume",
-    "source=${localEnv:HOME}/.aws,target=/home/node/.aws,type=bind,readonly",
-    "source=${localEnv:HOME}/.npmrc,target=/home/node/.npmrc,type=bind,readonly"
+    "source=${localEnv:NOPHI_EXCHANGE}/in/aws,target=/home/node/.aws,type=bind,readonly",
+    "source=${localEnv:NOPHI_EXCHANGE}/in/npmrc,target=/home/node/.npmrc,type=bind,readonly",
+    "source=${localEnv:NOPHI_EXCHANGE}/in,target=/nophi/in,type=bind,readonly",
+    "source=${localEnv:NOPHI_EXCHANGE}/out,target=/nophi/out,type=bind"
   ],
   "containerEnv": {
     "NODE_OPTIONS": "--max-old-space-size=4096",
     "CLAUDE_CONFIG_DIR": "/home/node/.claude",
-    "PHI_GUARD_FIREWALL": "${localEnv:PHI_GUARD_FIREWALL:web}",
+    "PHI_GUARD_FIREWALL": "${localEnv:PHI_GUARD_FIREWALL:strict}",
     "PHI_GUARD_EXTRA_HOSTS": "${localEnv:PHI_GUARD_EXTRA_HOSTS:}"
   },
-  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "workspaceMount": "source=${localEnv:NOPHI_EXCHANGE}/workspace,target=/workspace,type=bind,consistency=delegated",
   "workspaceFolder": "/workspace",
   "postStartCommand": "if [ \"$PHI_GUARD_FIREWALL\" = off ]; then echo 'phi-guard: egress firewall disabled (PHI_GUARD_FIREWALL=off)'; else sudo /usr/local/bin/init-firewall.sh \"$PHI_GUARD_FIREWALL\" \"$PHI_GUARD_EXTRA_HOSTS\"; fi",
   "waitFor": "postStartCommand"
